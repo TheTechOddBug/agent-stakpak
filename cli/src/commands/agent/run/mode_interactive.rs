@@ -597,6 +597,12 @@ pub async fn run_interactive(
                                         tool_call.clone().id,
                                         result_content.clone(),
                                     ));
+                                    tracing::debug!(
+                                        tool_call_id = %tool_call.id,
+                                        tool = %tool_call.function.name,
+                                        result_len = result_content.len(),
+                                        "tool_result_pushed_to_messages (agent->API pipeline)"
+                                    );
 
                                     send_input_event(
                                         &input_tx,
@@ -609,6 +615,10 @@ pub async fn run_interactive(
                                         ),
                                     )
                                     .await?;
+                                    tracing::debug!(
+                                        tool_call_id = %tool_call.id,
+                                        "tool_result_sent_to_tui (client display)"
+                                    );
                                 }
                             }
                             send_input_event(
@@ -640,6 +650,11 @@ pub async fn run_interactive(
                             tool_call.id.clone(),
                             "TOOL_CALL_REJECTED".to_string(),
                         ));
+                        tracing::debug!(
+                            tool_call_id = %tool_call.id,
+                            tool = %tool_call.function.name,
+                            "tool_result_pushed (rejected)"
+                        );
                         if !tools_queue.is_empty() {
                             let tool_call = tools_queue.remove(0);
                             send_tool_call(&input_tx, &tool_call).await?;
@@ -1014,6 +1029,11 @@ pub async fn run_interactive(
 
                 // Start loading before we begin the LLM request/stream handshake
                 start_stream_processing_loading(&input_tx).await?;
+
+                tracing::debug!(
+                    message_count = messages.len(),
+                    "sending_to_api (messages include any tool results just pushed)"
+                );
 
                 let headers = if study_mode {
                     let mut headers = HeaderMap::new();
