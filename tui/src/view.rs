@@ -11,11 +11,11 @@ use crate::services::message_pattern::spans_to_string;
 use crate::services::shell_popup;
 use crate::services::side_panel;
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph},
+    Frame,
 };
 
 pub fn view(f: &mut Frame, state: &mut AppState) {
@@ -45,8 +45,9 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
     }
 
     // Calculate the required height for the input area based on content
-    let input_area_width = main_area.width.saturating_sub(4) as usize;
-    let input_lines = calculate_input_lines(state, input_area_width); // -4 for borders and padding
+    // Subtract 2 for borders (matching render_multiline_input's content_area.width)
+    let input_area_width = main_area.width.saturating_sub(2) as usize;
+    let input_lines = calculate_input_lines(state, input_area_width);
     let input_height = (input_lines + 2) as u16;
     let margin_height = 1;
     let dropdown_showing = state.show_helper_dropdown
@@ -142,8 +143,9 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
     let message_area_width = padded_message_area.width as usize;
     let message_area_height = message_area.height as usize;
 
-    // Store message area y offset for click detection
+    // Store message area offsets for click/selection coordinate mapping
     state.message_area_y = message_area.y;
+    state.message_area_x = padded_message_area.x;
 
     render_messages(
         f,
@@ -332,17 +334,16 @@ fn render_messages(f: &mut Frame, state: &mut AppState, area: Rect, width: usize
     let max_scroll = total_lines.saturating_sub(height.saturating_sub(SCROLL_BUFFER_LINES));
 
     // Calculate scroll position - ensure it doesn't exceed max_scroll
+    // IMPORTANT: Write the computed scroll back to state so that event handlers
+    // (hover highlighting, text selection, click detection) use the same scroll
+    // value that was used for rendering. Without this, stay_at_bottom causes
+    // state.scroll to diverge from the actual rendered scroll.
     let scroll = if state.stay_at_bottom {
         max_scroll
     } else {
         state.scroll.min(max_scroll)
     };
-
-    // Debug: show area position
-    eprintln!(
-        "[RenderDebug] area.x={}, area.y={}, area.width={}, area.height={}, scroll={}",
-        area.x, area.y, area.width, area.height, scroll
-    );
+    state.scroll = scroll;
 
     // Create visible lines with pre-allocated capacity for better performance
     let mut visible_lines = Vec::with_capacity(height);
@@ -357,33 +358,13 @@ fn render_messages(f: &mut Frame, state: &mut AppState, area: Rect, width: usize
     }
 
     // Apply hover highlighting for user messages
-    // Use state.scroll (not local scroll) to match selection handler behavior
     let visible_lines = if let Some(hover_row) = state.hover_row {
-        // Subtract 1 to account for visual offset (same as selection click handling)
-        let hover_row_adjusted = (hover_row as usize).saturating_sub(1);
-        let row_in_message_area = hover_row_adjusted.saturating_sub(state.message_area_y as usize);
+        let row_in_message_area =
+            (hover_row as usize).saturating_sub(state.message_area_y as usize);
 
         // Check if hover is within message area
         if row_in_message_area < height {
-            // Use state.scroll to match how selection calculates absolute_line
-            let absolute_line = state.scroll + row_in_message_area;
-
-            // Debug logging for hover
-            eprintln!(
-                "[HoverDebug] hover_row={}, adjusted={}, msg_area_y={}, row_in_area={}, state.scroll={}, render_scroll={}, absolute_line={}, map={:?}",
-                hover_row,
-                hover_row_adjusted,
-                state.message_area_y,
-                row_in_message_area,
-                state.scroll,
-                scroll,
-                absolute_line,
-                state
-                    .line_to_message_map
-                    .iter()
-                    .map(|(s, e, _, _, _)| (*s, *e))
-                    .collect::<Vec<_>>()
-            );
+            let absolute_line = scroll + row_in_message_area;
 
             // Check if this line is a user message
             let is_user_message =
@@ -546,11 +527,13 @@ fn render_multiline_input(f: &mut Frame, state: &mut AppState, area: Rect) {
             Style::default().fg(Color::DarkGray)
         });
 
-    // Create content area inside the block
+    // Create content area inside the block (border takes 1 char on each side)
+    // The TextArea internally accounts for prefix width when wrapping,
+    // so we only subtract 2 for the borders here.
     let content_area = Rect {
         x: area.x + 1,
         y: area.y + 1,
-        width: area.width.saturating_sub(4),
+        width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
 

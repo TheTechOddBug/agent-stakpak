@@ -223,6 +223,7 @@ pub struct AppState {
     pub message_action_target_message_id: Option<Uuid>,    // The user message being acted on
     pub message_action_target_text: Option<String>,        // The text of the target message
     pub message_area_y: u16, // Y offset of message area for click detection
+    pub message_area_x: u16, // X offset of padded message area for column mapping
     pub hover_row: Option<u16>, // Current mouse hover row for debugging
 
     // ========== Input Area State ==========
@@ -446,6 +447,7 @@ impl AppState {
             message_action_target_message_id: None,
             message_action_target_text: None,
             message_area_y: 0,
+            message_area_x: 0,
             hover_row: None,
 
             // Profile switcher initialization
