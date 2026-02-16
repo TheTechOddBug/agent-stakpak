@@ -463,11 +463,11 @@ NOTES:
         // Build the stakpak command arguments
         let mut args = vec![exe_for_command.clone()];
 
-        // Add profile and config so subagent uses same profile/config as main agent
-        if let Some(profile) = profile_name {
+        // Add profile and config so subagent uses same profile/config as main agent (only when set)
+        if let Some(profile) = profile_name.filter(|p| *p != "default") {
             args.extend(["--profile".to_string(), profile.to_string()]);
         }
-        if let Some(path) = config_path {
+        if let Some(path) = config_path.filter(|p| !p.is_empty()) {
             args.extend(["--config".to_string(), path.to_string()]);
         }
 

@@ -113,10 +113,14 @@ pub async fn spawn_agent(config: SpawnConfig) -> Result<AgentResult, AgentError>
     let mut cmd = Command::new(&binary);
     cmd.arg("-a") // async mode
         .arg("-o")
-        .arg("json") // JSON output for robust parsing
-        .arg("--profile")
-        .arg(&config.profile)
-        .arg(&config.prompt)
+        .arg("json"); // JSON output for robust parsing
+
+    // Only pass --profile when explicitly set (not default)
+    if config.profile != "default" {
+        cmd.arg("--profile").arg(&config.profile);
+    }
+
+    cmd.arg(&config.prompt)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
