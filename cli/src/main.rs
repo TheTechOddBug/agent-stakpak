@@ -1,3 +1,8 @@
+// CLI crate uses string slicing for parsing model strings, frontmatter, tool names,
+// error messages, and rendering. All indices come from find()/rfind() of ASCII
+// delimiters on the same strings.
+#![allow(clippy::string_slice)]
+
 use clap::Parser;
 use names::{self, Name};
 use rustls::crypto::CryptoProvider;
