@@ -55,6 +55,49 @@ pub enum ExecutorError {
     OutputError(String),
 }
 
+const ETXTBSY_ERRNO: i32 = 26;
+const SPAWN_RETRY_ATTEMPTS: usize = 20;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(ETXTBSY_ERRNO)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+async fn spawn_check_script(path: &Path) -> Result<tokio::process::Child, ExecutorError> {
+    let mut attempt = 1;
+
+    loop {
+        match Command::new(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if is_text_file_busy(&error) && attempt < SPAWN_RETRY_ATTEMPTS => {
+                debug!(
+                    script = %path.display(),
+                    attempt,
+                    retry_delay_ms = SPAWN_RETRY_DELAY.as_millis(),
+                    "Script spawn hit ETXTBSY; retrying"
+                );
+                attempt += 1;
+                tokio::time::sleep(SPAWN_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(ExecutorError::SpawnError(error.to_string())),
+        }
+    }
+}
+
 /// Run a check script with timeout enforcement.
 ///
 /// # Arguments
@@ -87,13 +130,8 @@ pub async fn run_check_script(
 
     debug!(script = %path.display(), timeout_secs = timeout.as_secs(), "Running check script");
 
-    // Spawn the process
-    let mut child = Command::new(path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| ExecutorError::SpawnError(e.to_string()))?;
+    // Spawn the process (retry ETXTBSY transient errors on Unix CI filesystems)
+    let mut child = spawn_check_script(path).await?;
 
     // Take ownership of stdout/stderr handles
     let mut stdout_handle = child.stdout.take();
@@ -335,9 +373,13 @@ mod tests {
         let script_path = dir.path().join("check6.sh");
 
         // Create file without execute permission
-        let mut file = File::create(&script_path).expect("Failed to create script");
-        file.write_all(b"#!/bin/sh\nexit 0\n")
-            .expect("Failed to write script");
+        {
+            let mut file = File::create(&script_path).expect("Failed to create script");
+            file.write_all(b"#!/bin/sh\nexit 0\n")
+                .expect("Failed to write script");
+            file.sync_all().expect("Failed to sync script");
+            // file is dropped (closed) here before metadata/permission operations
+        }
 
         let mut perms = fs::metadata(&script_path)
             .expect("Failed to get metadata")
