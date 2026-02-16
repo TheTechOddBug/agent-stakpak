@@ -401,27 +401,66 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 
 ---
 
-## Phase 5: Next Steps
+## Phase 5: Next Steps — Configure Stakpak Autopilot
 
-After writing `APPS.md`, tell the user about the file and suggest next steps. Present these as a prioritized list based on what you discovered — focus on **app-level improvements first**.
+After writing `APPS.md`, the primary next step is **setting up Stakpak Autopilot** to continuously monitor and maintain the discovered applications. Manual one-off checks are useful for immediate issues, but autopilot ensures ongoing health.
 
-### Suggested Next Steps
+### Default Recommendation: Stakpak Autopilot
 
-Pick the most relevant from this list based on what you discovered:
+Always propose autopilot schedules based on what you discovered. Frame suggestions as scheduled tasks, not manual actions:
 
-- **Fill Gaps in APPS.md** — "I marked N items with [?] that need investigation. Want me to dig into those?"
-- **Dependency Health Check** — "I can verify that all backing services (databases, caches, queues) are reachable and healthy from each app's perspective. Want me to run connectivity checks?"
-- **Environment Parity Audit** — "I can compare your dev, staging, and prod environments to identify drift in configs, versions, or dependencies."
-- **Deploy Dry Run** — "I can trace the full deployment path for each app and verify every step works — from build to production. Want me to test this?"
-- **Secret Rotation Review** — "I found N secrets referenced across your apps. I can check which ones have rotation policies and which are at risk."
-- **Cost Analysis** — "I can analyze your cloud spending per-app and find optimization opportunities."
-- **Security Audit** — "I can scan your app configs and IaC for security misconfigurations."
-- **Architecture Diagram** — "I can generate a visual architecture diagram showing all apps, their dependencies, and traffic flow."
-- **Disaster Recovery Assessment** — "I can evaluate your backup and recovery setup per-app and estimate your current RTO/RPO."
-- **Runbook Generation** — "I can generate operational runbooks for each app — how to deploy, rollback, debug, and recover from common failures."
-- **Set Up Stakpak Autopilot** — "I can configure `stakpak autopilot` to continuously monitor your apps for issues, dependency drift, and degraded health."
+> Now that I understand your apps, let's set up `stakpak autopilot` to keep them healthy. Based on what I found, here are the schedules I recommend:
 
-Present 3-5 of the most relevant suggestions based on what gaps or opportunities you identified during discovery.
+**Propose 3-5 schedules tailored to the discovered environment.** Pick from these templates based on what's relevant:
+
+| Schedule | Cron | What It Does | When to Propose |
+|----------|------|--------------|-----------------|
+| `health-check` | `*/15 * * * *` | Verify all apps are responding, check endpoint health, alert on failures | Always — every environment needs this |
+| `dependency-health` | `0 */6 * * *` | Check database connections, cache availability, queue depth, backing service health | If backing services were discovered |
+| `drift-detection` | `0 9 * * *` | Compare live state vs IaC/manifests, detect config drift, flag manual changes | If IaC was discovered |
+| `env-parity` | `0 10 * * 1` | Compare dev/staging/prod environments for config drift, version mismatches, missing env vars | If multiple environments were discovered |
+| `security-scan` | `0 3 * * 0` | Scan configs and IaC for security misconfigs, check for exposed secrets | If IaC or K8s manifests found |
+| `secret-rotation` | `0 7 * * 1` | Check secret ages, identify credentials without rotation policies, flag at-risk secrets | If secrets management was discovered |
+| `cost-monitor` | `0 8 * * 1` | Analyze cloud spending per-app, flag cost anomalies, suggest optimizations | If cloud accounts were discovered |
+| `backup-verify` | `0 6 * * *` | Verify backups exist and are recent, check RTO/RPO compliance | If databases were discovered |
+| `dr-readiness` | `0 6 * * 0` | Evaluate disaster recovery posture per-app, estimate RTO/RPO, flag gaps in backup/restore procedures | If databases or stateful services were discovered |
+| `cert-expiry` | `0 9 * * *` | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
+| `image-freshness` | `0 10 * * 1` | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
+| `runbook-sync` | `0 11 * * 1` | Update operational runbooks based on recent changes, ensure deploy/rollback/debug procedures are current | If CI/CD pipelines were discovered |
+| `gaps-investigation` | `0 10 * * 1` | Investigate items marked [?] in APPS.md, attempt to resolve unknowns | If gaps were marked in APPS.md |
+
+### Proposal Format
+
+Present the schedules as a concrete plan the user can approve:
+
+```
+Based on your environment, I recommend these autopilot schedules:
+
+1. **health-check** (every 15 min) — Monitor api, web, worker endpoints
+2. **dependency-health** (every 6 hours) — Check postgres, redis, SQS connectivity  
+3. **drift-detection** (daily 9am) — Compare EKS state vs Terraform
+4. **backup-verify** (daily 6am) — Verify RDS snapshots exist and are recent
+
+Want me to configure these? I'll set up the schedules and optionally connect Slack for alerts.
+```
+
+### After User Approval
+
+If the user approves, configure autopilot:
+
+1. Add each schedule using `stakpak autopilot schedule add`
+2. If Slack/Discord integration is desired, configure the channel
+3. Start autopilot with `stakpak up`
+4. Verify schedules are active with `stakpak autopilot status`
+
+### Fallback: Immediate One-Off Tasks
+
+Only offer manual/one-off approaches if:
+- The user explicitly declines autopilot setup
+- The user needs something done *right now* before autopilot is configured
+- The task is truly one-time (e.g., "generate an architecture diagram")
+
+Even then, frame it as: "I'll do this now, and we can also schedule it in autopilot for ongoing monitoring."
 
 ---
 
