@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::router::{Binding, BindingMatch, DmScope, PeerMatch, PeerMatchKind, RouterConfig};
 
@@ -48,6 +49,22 @@ pub enum ApprovalMode {
     AllowAll,
     DenyAll,
     Allowlist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GatewayConfigValidationError {
+    #[error("at least one channel must be configured")]
+    MissingChannels,
+    #[error("telegram token cannot be empty")]
+    EmptyTelegramToken,
+    #[error("discord token cannot be empty")]
+    EmptyDiscordToken,
+    #[error("slack bot_token cannot be empty")]
+    EmptySlackBotToken,
+    #[error("slack app_token cannot be empty")]
+    EmptySlackAppToken,
+    #[error("approval_mode=allowlist requires non-empty approval_allowlist")]
+    EmptyApprovalAllowlist,
 }
 
 impl Default for GatewaySettings {
@@ -151,6 +168,12 @@ impl Default for GatewayConfig {
 
 impl GatewayConfig {
     pub fn load(config_path: &Path, cli: &GatewayCliFlags) -> Result<Self> {
+        let config = Self::load_unvalidated(config_path, cli)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn load_unvalidated(config_path: &Path, cli: &GatewayCliFlags) -> Result<Self> {
         let mut config = if config_path.exists() {
             let text = std::fs::read_to_string(config_path).map_err(|error| {
                 anyhow!(
@@ -172,7 +195,6 @@ impl GatewayConfig {
         config.apply_env_overrides();
         config.apply_cli_overrides(cli);
         config.normalize_paths();
-        config.validate()?;
 
         Ok(config)
     }
@@ -184,8 +206,92 @@ impl GatewayConfig {
             })?;
         }
 
-        let persisted = PersistedGatewayConfig::from_runtime(self);
-        let text = toml::to_string_pretty(&persisted)
+        let mut root = load_toml_root_table(config_path)?;
+
+        {
+            let server = ensure_subtable(&mut root, "server");
+            server.insert(
+                "url".to_string(),
+                toml::Value::String(self.server.url.clone()),
+            );
+            server.insert(
+                "token".to_string(),
+                toml::Value::String(self.server.token.clone()),
+            );
+        }
+
+        {
+            let gateway = ensure_subtable(&mut root, "gateway");
+            gateway.insert(
+                "store".to_string(),
+                toml::Value::String(self.gateway.store_path.to_string_lossy().to_string()),
+            );
+            match &self.gateway.model {
+                Some(model) => {
+                    gateway.insert("model".to_string(), toml::Value::String(model.clone()));
+                }
+                None => {
+                    gateway.remove("model");
+                }
+            }
+            gateway.insert(
+                "title_template".to_string(),
+                toml::Value::String(self.gateway.title_template.clone()),
+            );
+            gateway.insert(
+                "prune_after_hours".to_string(),
+                toml::Value::Integer(
+                    i64::try_from(self.gateway.prune_after_hours)
+                        .map_err(|_| anyhow!("prune_after_hours exceeds i64 range"))?,
+                ),
+            );
+            gateway.insert(
+                "delivery_context_ttl_hours".to_string(),
+                toml::Value::Integer(
+                    i64::try_from(self.gateway.delivery_context_ttl_hours)
+                        .map_err(|_| anyhow!("delivery_context_ttl_hours exceeds i64 range"))?,
+                ),
+            );
+            gateway.insert(
+                "approval_mode".to_string(),
+                toml::Value::try_from(&self.gateway.approval_mode)
+                    .map_err(|error| anyhow!("failed to serialize approval_mode: {error}"))?,
+            );
+            gateway.insert(
+                "approval_allowlist".to_string(),
+                toml::Value::Array(
+                    self.gateway
+                        .approval_allowlist
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+
+        {
+            let routing = ensure_subtable(&mut root, "routing");
+            routing.insert(
+                "dm_scope".to_string(),
+                toml::Value::try_from(&self.routing.dm_scope)
+                    .map_err(|error| anyhow!("failed to serialize dm_scope: {error}"))?,
+            );
+            routing.insert(
+                "bindings".to_string(),
+                toml::Value::try_from(&self.routing.bindings)
+                    .map_err(|error| anyhow!("failed to serialize bindings: {error}"))?,
+            );
+        }
+
+        {
+            let channels = ensure_subtable(&mut root, "channels");
+            upsert_optional_subtable(channels, "telegram", &self.channels.telegram)?;
+            upsert_optional_subtable(channels, "discord", &self.channels.discord)?;
+            upsert_optional_subtable(channels, "slack", &self.channels.slack)?;
+        }
+
+        let text = toml::to_string_pretty(&toml::Value::Table(root))
             .map_err(|error| anyhow!("failed to serialize gateway config: {error}"))?;
 
         std::fs::write(config_path, text).map_err(|error| {
@@ -198,41 +304,43 @@ impl GatewayConfig {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate_with_error(&self) -> std::result::Result<(), GatewayConfigValidationError> {
         if self.enabled_channels().is_empty() {
-            return Err(anyhow!("at least one channel must be configured"));
+            return Err(GatewayConfigValidationError::MissingChannels);
         }
 
         if let Some(telegram) = &self.channels.telegram
             && telegram.token.trim().is_empty()
         {
-            return Err(anyhow!("telegram token cannot be empty"));
+            return Err(GatewayConfigValidationError::EmptyTelegramToken);
         }
 
         if let Some(discord) = &self.channels.discord
             && discord.token.trim().is_empty()
         {
-            return Err(anyhow!("discord token cannot be empty"));
+            return Err(GatewayConfigValidationError::EmptyDiscordToken);
         }
 
         if let Some(slack) = &self.channels.slack {
             if slack.bot_token.trim().is_empty() {
-                return Err(anyhow!("slack bot_token cannot be empty"));
+                return Err(GatewayConfigValidationError::EmptySlackBotToken);
             }
             if slack.app_token.trim().is_empty() {
-                return Err(anyhow!("slack app_token cannot be empty"));
+                return Err(GatewayConfigValidationError::EmptySlackAppToken);
             }
         }
 
         if matches!(self.gateway.approval_mode, ApprovalMode::Allowlist)
             && self.gateway.approval_allowlist.is_empty()
         {
-            return Err(anyhow!(
-                "approval_mode=allowlist requires non-empty approval_allowlist"
-            ));
+            return Err(GatewayConfigValidationError::EmptyApprovalAllowlist);
         }
 
         Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_with_error().map_err(anyhow::Error::new)
     }
 
     pub fn enabled_channels(&self) -> Vec<&str> {
@@ -380,6 +488,67 @@ impl GatewayConfig {
     }
 }
 
+fn load_toml_root_table(config_path: &Path) -> Result<toml::value::Table> {
+    if !config_path.exists() {
+        return Ok(toml::value::Table::new());
+    }
+
+    let text = std::fs::read_to_string(config_path).map_err(|error| {
+        anyhow!(
+            "failed to read gateway config {}: {error}",
+            config_path.display()
+        )
+    })?;
+
+    let value: toml::Value = toml::from_str(&text).map_err(|error| {
+        anyhow!(
+            "failed to parse gateway config {}: {error}",
+            config_path.display()
+        )
+    })?;
+
+    match value {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(anyhow!(
+            "failed to parse gateway config {}: top-level value must be a TOML table",
+            config_path.display()
+        )),
+    }
+}
+
+fn ensure_subtable<'a>(table: &'a mut toml::value::Table, key: &str) -> &'a mut toml::value::Table {
+    if !matches!(table.get(key), Some(toml::Value::Table(_))) {
+        table.insert(
+            key.to_string(),
+            toml::Value::Table(toml::value::Table::new()),
+        );
+    }
+
+    match table.get_mut(key) {
+        Some(toml::Value::Table(subtable)) => subtable,
+        _ => unreachable!("subtable just inserted"),
+    }
+}
+
+fn upsert_optional_subtable<T: Serialize>(
+    table: &mut toml::value::Table,
+    key: &str,
+    value: &Option<T>,
+) -> Result<()> {
+    match value {
+        Some(inner) => {
+            let serialized = toml::Value::try_from(inner)
+                .map_err(|error| anyhow!("failed to serialize {key} config: {error}"))?;
+            table.insert(key.to_string(), serialized);
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct PersistedGatewayConfig {
     #[serde(default)]
@@ -428,33 +597,6 @@ impl PersistedGatewayConfig {
                 telegram: self.channels.telegram,
                 discord: self.channels.discord,
                 slack: self.channels.slack,
-            },
-        }
-    }
-
-    fn from_runtime(config: &GatewayConfig) -> Self {
-        Self {
-            server: PersistedServerConfig {
-                url: config.server.url.clone(),
-                token: config.server.token.clone(),
-            },
-            gateway: PersistedGatewaySettings {
-                store: Some(config.gateway.store_path.to_string_lossy().to_string()),
-                model: config.gateway.model.clone(),
-                title_template: Some(config.gateway.title_template.clone()),
-                prune_after_hours: Some(config.gateway.prune_after_hours),
-                delivery_context_ttl_hours: Some(config.gateway.delivery_context_ttl_hours),
-                approval_mode: Some(config.gateway.approval_mode.clone()),
-                approval_allowlist: Some(config.gateway.approval_allowlist.clone()),
-            },
-            routing: PersistedRoutingConfig {
-                dm_scope: Some(config.routing.dm_scope.clone()),
-                bindings: config.routing.bindings.clone(),
-            },
-            channels: PersistedChannelConfigs {
-                telegram: config.channels.telegram.clone(),
-                discord: config.channels.discord.clone(),
-                slack: config.channels.slack.clone(),
             },
         }
     }
@@ -554,6 +696,8 @@ fn expand_tilde_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{
         ApprovalMode, ChannelConfigs, GatewayCliFlags, GatewayConfig, GatewaySettings,
         TelegramConfig,
@@ -628,5 +772,99 @@ mod tests {
 
         let title = config.render_title_template("telegram", "42", "group", "-100");
         assert_eq!(title, "telegram:group:42");
+    }
+
+    #[test]
+    fn load_unvalidated_allows_empty_channels() {
+        let dir_result = tempfile::tempdir();
+        assert!(dir_result.is_ok());
+        let dir = match dir_result {
+            Ok(value) => value,
+            Err(error) => panic!("failed to create temp dir: {error}"),
+        };
+        let path = dir.path().join("autopilot.toml");
+
+        let write_result = fs::write(
+            &path,
+            r##"
+[server]
+url = "http://127.0.0.1:4096"
+token = ""
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let cli = GatewayCliFlags::default();
+        let config_result = GatewayConfig::load_unvalidated(&path, &cli);
+        assert!(config_result.is_ok());
+
+        let config = match config_result {
+            Ok(value) => value,
+            Err(error) => panic!("failed to load config: {error}"),
+        };
+        assert!(config.enabled_channels().is_empty());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn save_preserves_autopilot_sections() {
+        let dir_result = tempfile::tempdir();
+        assert!(dir_result.is_ok());
+        let dir = match dir_result {
+            Ok(value) => value,
+            Err(error) => panic!("failed to create temp dir: {error}"),
+        };
+        let path = dir.path().join("autopilot.toml");
+
+        let seed = r##"
+[server]
+listen = "127.0.0.1:4096"
+show_token = false
+no_auth = false
+
+[watch]
+db_path = "~/.stakpak/autopilot/autopilot.db"
+log_dir = "~/.stakpak/autopilot/logs"
+
+[defaults]
+profile = "default"
+
+[[schedules]]
+name = "health-check"
+cron = "*/5 * * * *"
+prompt = "Check system health"
+
+[notifications]
+gateway_url = "http://127.0.0.1:4096"
+channel = "slack"
+chat_id = "#ops"
+"##;
+        let write_result = fs::write(&path, seed);
+        assert!(write_result.is_ok());
+
+        let mut config = GatewayConfig::default();
+        config.server.url = "http://127.0.0.1:5001".to_string();
+        config.server.token = "secret-token".to_string();
+        config.channels.telegram = Some(TelegramConfig {
+            token: "123:ABC".to_string(),
+            require_mention: false,
+        });
+
+        let save_result = config.save(&path);
+        assert!(save_result.is_ok());
+
+        let reloaded = fs::read_to_string(&path);
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
+
+        assert!(reloaded.contains("[watch]"));
+        assert!(reloaded.contains("[[schedules]]"));
+        assert!(reloaded.contains("[notifications]"));
+        assert!(reloaded.contains("listen = \"127.0.0.1:4096\""));
+        assert!(reloaded.contains("url = \"http://127.0.0.1:5001\""));
+        assert!(reloaded.contains("token = \"secret-token\""));
     }
 }
