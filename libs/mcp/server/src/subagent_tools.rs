@@ -461,7 +461,7 @@ NOTES:
         };
 
         // Build the stakpak command arguments
-        let mut args = vec![exe_for_command.clone()];
+        let mut args = vec![exe_for_command.clone(), "-a".to_string()];
 
         // Add profile and config so subagent uses same profile/config as main agent (only when set)
         if let Some(profile) = profile_name.filter(|p| *p != "default") {
@@ -470,8 +470,6 @@ NOTES:
         if let Some(path) = config_path.filter(|p| !p.is_empty()) {
             args.extend(["--config".to_string(), path.to_string()]);
         }
-
-        args.push("-a".to_string());
 
         // --pause-on-approval only when NOT in sandbox mode
         if !enable_sandbox {
