@@ -29,3 +29,6 @@ regex.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints.clippy]
+string_slice = "deny"
