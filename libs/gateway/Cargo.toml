@@ -28,8 +28,6 @@ axum = { workspace = true }
 tracing = { workspace = true }
 bytes = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-
-[dev-dependencies]
 tempfile = { workspace = true }
 
 [lints]
