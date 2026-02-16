@@ -218,29 +218,25 @@ Each subagent should:
 
 ## Phase 2: Focused Questions
 
-After all discovery subagents complete, consolidate what you learned and identify gaps. Then ask the user **one consolidated set of questions** covering only what you couldn't determine automatically.
+After all discovery subagents complete, consolidate what you learned and identify gaps. Then ask the user questions covering only what you couldn't determine automatically.
 
-Structure your questions as a numbered list grouped by topic. For example:
+**Ask at most 3 questions at a time.** Wait for the user's answers before asking the next batch. This keeps the conversation manageable — users get overwhelmed by long numbered lists. Prioritize the highest-impact gaps first.
 
-> Based on my scan of your environment, here's what I found [brief summary]. I have a few questions to fill in the gaps:
+Structure each batch as a short numbered list. For example:
+
+> Based on my scan, I found N services (api, web, worker) running on EKS. A few quick questions:
 >
-> **Applications**
-> 1. I found N services in your codebase (api, web, worker). Are these all your apps, or are there others I didn't find (in other repos, other accounts, third-party platforms)?
-> 2. Which of these are customer-facing vs internal?
-> 3. I see the `api` service references a Postgres database and Redis — is that all it depends on, or are there other backing services?
+> 1. Are these all your apps, or are there others in other repos/accounts?
+> 2. Which are customer-facing vs internal?
+> 3. I see `api` references Postgres and Redis — any other backing services I missed?
 >
-> **Runtime & Deployment**
-> 4. I found deployments on EKS for `api` and `web`, but I couldn't find where `worker` runs. Where is it deployed?
-> 5. Are there any environments beyond dev/staging/prod?
->
-> **Operations**
-> 6. What's the on-call / incident response setup? Who gets paged and through what tool?
-> 7. Are there any known issues, tech debt, or upcoming migrations I should be aware of?
->
-> Feel free to skip any you'd rather not answer right now — I'll note them as unknown and we can revisit later.
+> Feel free to skip any — I'll note them as unknown and we can revisit later.
+
+Then after the user responds, follow up with the next batch (e.g., runtime gaps, operational context).
 
 **Guidelines for questions:**
-- Maximum 8-10 questions total — prioritize the most impactful gaps
+- **Maximum 3 questions per batch** — ask, wait, then ask more if needed
+- Maximum 8-10 questions total across all batches — prioritize the most impactful gaps
 - Make questions multiple-choice or yes/no where possible
 - Always give the user an out ("skip if you prefer")
 - Never ask about things you already discovered with high confidence
@@ -250,24 +246,27 @@ Structure your questions as a numbered list grouped by topic. For example:
 
 ## Phase 3: Present Findings
 
-After receiving the user's answers (or if they skip), present a complete summary. **Lead with applications, group everything else under the apps they support**:
+After receiving the user's answers (or if they skip), present findings **one app at a time** for review. Users need to verify each app individually — don't dump the entire landscape at once.
+
+For each app, present a short summary and ask for confirmation before moving on:
 
 ```
-Apps
-- api (Go) — REST API, EKS prod-eks (us-east-1), 3 replicas
+App 1/3: api (Go)
+  Runtime: REST API, EKS prod-eks (us-east-1), 3 replicas
   Depends on: postgres (RDS), redis (ElastiCache), order-queue (SQS)
   Entry: cmd/server/main.go :8080 — Deploy: GitHub Actions → ECR → ArgoCD
 
-- worker (Python) — background jobs, ECS, 2 tasks
-  Depends on: postgres (RDS), order-queue (SQS), uploads (S3)
-  Entry: worker/main.py — Deploy: GitHub Actions → ECR → ECS rolling
+Does this look right? Any corrections?
+```
 
+After the user confirms (or corrects), present the next app. Once all apps are reviewed, show a brief infrastructure summary:
+
+```
 Traffic: CloudFront → ALB → EKS ingress | Route53, cert-manager
 Infra: AWS 2 accounts, EKS 1.28, Terraform (VPC, EKS, RDS, SQS)
 ```
 
-Ask the user:
-> Does this look accurate? Anything I got wrong or missed? Any corrections before I write this to APPS.md?
+> Anything else I missed before I write this to APPS.md?
 
 ---
 
@@ -275,10 +274,13 @@ Ask the user:
 
 Create (or update) `APPS.md` in the current working directory with the verified findings.
 
-**Incremental writing strategy:**
-- For large environments, do NOT try to hold everything in memory and write it all at once
-- Instead, build the file incrementally: create the file with the header and first completed section, then append/update sections as you process each discovery domain
-- This prevents context overflow and ensures partial results are saved even if something fails later
+**Incremental writing strategy — this is critical:**
+The init process can take 10-60 minutes depending on environment complexity. Your context window **will** get trimmed during long sessions to make room for new information. APPS.md is your persistent memory — write to it early and often so trimmed context is not lost.
+
+- Create the file with the header and first completed section as soon as Phase 1 subagents return — do NOT wait until all phases are done
+- After each phase (discovery, questions, per-app review), update APPS.md with what you've confirmed so far
+- Before starting a new phase, re-read APPS.md to recover any context that may have been trimmed
+- If something fails mid-process, partial results are already saved
 
 Use this structure:
 
@@ -411,35 +413,70 @@ Always propose autopilot schedules based on what you discovered. Frame suggestio
 
 > Now that I understand your apps, let's set up `stakpak autopilot` to keep them healthy. Based on what I found, here are the schedules I recommend:
 
-**Propose 3-5 schedules tailored to the discovered environment.** Pick from these templates based on what's relevant:
+### Checks: Keep Autopilot Deterministic
 
-| Schedule | Cron | What It Does | When to Propose |
-|----------|------|--------------|-----------------|
-| `health-check` | `*/15 * * * *` | Verify all apps are responding, check endpoint health, alert on failures | Always — every environment needs this |
-| `dependency-health` | `0 */6 * * *` | Check database connections, cache availability, queue depth, backing service health | If backing services were discovered |
-| `drift-detection` | `0 9 * * *` | Compare live state vs IaC/manifests, detect config drift, flag manual changes | If IaC was discovered |
-| `env-parity` | `0 10 * * 1` | Compare dev/staging/prod environments for config drift, version mismatches, missing env vars | If multiple environments were discovered |
-| `security-scan` | `0 3 * * 0` | Scan configs and IaC for security misconfigs, check for exposed secrets | If IaC or K8s manifests found |
-| `secret-rotation` | `0 7 * * 1` | Check secret ages, identify credentials without rotation policies, flag at-risk secrets | If secrets management was discovered |
-| `cost-monitor` | `0 8 * * 1` | Analyze cloud spending per-app, flag cost anomalies, suggest optimizations | If cloud accounts were discovered |
-| `backup-verify` | `0 6 * * *` | Verify backups exist and are recent, check RTO/RPO compliance | If databases were discovered |
-| `dr-readiness` | `0 6 * * 0` | Evaluate disaster recovery posture per-app, estimate RTO/RPO, flag gaps in backup/restore procedures | If databases or stateful services were discovered |
-| `cert-expiry` | `0 9 * * *` | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
-| `image-freshness` | `0 10 * * 1` | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
-| `runbook-sync` | `0 11 * * 1` | Update operational runbooks based on recent changes, ensure deploy/rollback/debug procedures are current | If CI/CD pipelines were discovered |
-| `gaps-investigation` | `0 10 * * 1` | Investigate items marked [?] in APPS.md, attempt to resolve unknowns | If gaps were marked in APPS.md |
+Every schedule should use a **check script** (`--check`) whenever the trigger condition can be verified deterministically. Checks are lightweight shell scripts that run *before* waking the agent — if the check passes/fails (based on `trigger_on`), the agent runs; otherwise it sleeps. This avoids wasting agent steps (and RAM) on situations that don't need attention.
+
+- Use `--trigger-on failure` (default) to wake the agent only when the check detects a problem
+- Use `--trigger-on success` to wake the agent only when a precondition is met
+- Write checks as simple scripts: curl a health endpoint, query a DB, check a file age, etc.
+- Store checks in `~/.stakpak/checks/` on the target machine
+- Use the `create` tool with remote path format (`user@host:/path`) to write check scripts to remote servers
+
+### Schedule Tiers
+
+**Propose schedules in two tiers.** Start with the minimum required to protect the user's crown jewels, then offer additional schedules.
+
+#### Tier 1: Crown Jewels (always propose these)
+
+These are the minimum schedules to protect critical applications and data. Propose them for every environment:
+
+| Schedule | Cron | Check | What It Does |
+|----------|------|-------|--------------|
+| `health-check` | `*/15 * * * *` | `checks/health.sh` — curl app endpoints | Verify all apps are responding, alert on failures |
+| `backup-verify` | `0 6 * * *` | `checks/backup-age.sh` — check last backup timestamp | Verify backups exist and are recent, check RTO/RPO compliance |
+
+> These two schedules are the bare minimum. Health tells you something is broken *now*; backup-verify tells you you can recover *later*. Everything else is optimization.
+
+#### Tier 2: Recommended (propose based on what was discovered)
+
+Pick from these templates based on what's relevant. **Stagger cron minutes** — never schedule multiple jobs at `:00`. Spread them across the hour to avoid RAM spikes from concurrent agent runs.
+
+| Schedule | Cron | Check | What It Does | When to Propose |
+|----------|------|-------|--------------|-----------------|
+| `dependency-health` | `5 */6 * * *` | `checks/deps.sh` — test DB/cache/queue connectivity | Check database connections, cache availability, queue depth | If backing services were discovered |
+| `drift-detection` | `10 9 * * *` | *(none — always run)* | Compare live state vs IaC/manifests, detect config drift | If IaC was discovered |
+| `env-parity` | `15 10 * * 1` | *(none — always run)* | Compare dev/staging/prod for config drift, version mismatches | If multiple environments were discovered |
+| `security-scan` | `20 3 * * 0` | *(none — always run)* | Scan configs and IaC for security misconfigs | If IaC or K8s manifests found |
+| `secret-rotation` | `25 7 * * 1` | `checks/secret-age.sh` — check secret ages | Check secret ages, flag credentials without rotation policies | If secrets management was discovered |
+| `cost-monitor` | `30 8 * * 1` | *(none — always run)* | Analyze cloud spending per-app, flag cost anomalies | If cloud accounts were discovered |
+| `dr-readiness` | `35 6 * * 0` | *(none — always run)* | Evaluate disaster recovery posture, estimate RTO/RPO | If databases or stateful services were discovered |
+| `cert-expiry` | `40 9 * * *` | `checks/cert-expiry.sh` — check days until expiry | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
+| `image-freshness` | `45 10 * * 1` | *(none — always run)* | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
+| `runbook-sync` | `50 11 * * 1` | *(none — always run)* | Update operational runbooks based on recent changes | If CI/CD pipelines were discovered |
+| `gaps-investigation` | `55 10 * * 1` | *(none — always run)* | Investigate items marked [?] in APPS.md | If gaps were marked in APPS.md |
+
+These are examples, **not an exhaustive list**. Use your judgment to create additional schedules tailored to the specific environment — e.g., custom app-specific checks, compliance scans, or anything else the discovered infrastructure warrants.
+
+**Staggering rule:** When generating cron expressions, distribute minutes across the hour (e.g., `:05`, `:10`, `:15`...). Never put two schedules on the same minute.
 
 ### Proposal Format
 
-Present the schedules as a concrete plan the user can approve:
+Present the schedules as a concrete plan the user can approve. **Always lead with Tier 1:**
 
 ```
-Based on your environment, I recommend these autopilot schedules:
+To protect your crown jewels, I recommend starting with these two:
 
 1. **health-check** (every 15 min) — Monitor api, web, worker endpoints
-2. **dependency-health** (every 6 hours) — Check postgres, redis, SQS connectivity  
-3. **drift-detection** (daily 9am) — Compare EKS state vs Terraform
-4. **backup-verify** (daily 6am) — Verify RDS snapshots exist and are recent
+   Check: curl health endpoints → only wake agent if something is down
+2. **backup-verify** (daily 6am) — Verify RDS snapshots exist and are recent
+   Check: verify last backup < 24h old → only wake agent if backup is stale
+
+And based on your setup, I'd also add:
+
+3. **dependency-health** (every 6h, at :05) — Check postgres, redis, SQS connectivity
+   Check: test DB/cache/queue connections → only wake agent on failure
+4. **drift-detection** (daily 9:10am) — Compare EKS state vs Terraform
 
 Want me to configure these? I'll set up the schedules and optionally connect Slack for alerts.
 ```
