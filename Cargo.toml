@@ -104,3 +104,4 @@ libsql = "0.9.29"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+string_slice = "deny"

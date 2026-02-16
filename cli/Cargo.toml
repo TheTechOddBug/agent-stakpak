@@ -72,6 +72,5 @@ which = "7.0"
 tempfile = "3"
 test-case = "3"
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true
