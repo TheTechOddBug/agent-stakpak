@@ -453,6 +453,7 @@ fn dedup_tool_results(mut messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::super::ContextManager;
     use super::*;
@@ -853,39 +854,30 @@ mod tests {
         // at indices 37 and 39, so trim_end = 37 and messages 37-39 are untrimmed.
         let trimmed_idx = meta["trimmed_up_to_message_index"].as_u64().unwrap() as usize;
         for msg in &result[trimmed_idx..] {
-            match &msg.content {
-                LLMMessageContent::String(s) => {
-                    assert_ne!(
-                        s, TRIMMED_CONTENT_PLACEHOLDER,
-                        "Messages after trim boundary should not be trimmed"
-                    );
-                }
-                _ => {}
+            if let LLMMessageContent::String(s) = &msg.content {
+                assert_ne!(
+                    s, TRIMMED_CONTENT_PLACEHOLDER,
+                    "Messages after trim boundary should not be trimmed"
+                );
             }
         }
 
         // Earlier assistant messages should be trimmed, user messages preserved
         let first_assistant = &result[1]; // index 1 is assistant
-        match &first_assistant.content {
-            LLMMessageContent::String(s) => {
-                assert_eq!(
-                    s, TRIMMED_CONTENT_PLACEHOLDER,
-                    "Early assistant messages should be trimmed"
-                );
-            }
-            _ => {}
+        if let LLMMessageContent::String(s) = &first_assistant.content {
+            assert_eq!(
+                s, TRIMMED_CONTENT_PLACEHOLDER,
+                "Early assistant messages should be trimmed"
+            );
         }
 
         // User messages should NOT be trimmed
         let first_user = &result[0]; // index 0 is user
-        match &first_user.content {
-            LLMMessageContent::String(s) => {
-                assert_ne!(
-                    s, TRIMMED_CONTENT_PLACEHOLDER,
-                    "User messages should never be trimmed"
-                );
-            }
-            _ => {}
+        if let LLMMessageContent::String(s) = &first_user.content {
+            assert_ne!(
+                s, TRIMMED_CONTENT_PLACEHOLDER,
+                "User messages should never be trimmed"
+            );
         }
     }
 
@@ -1067,9 +1059,9 @@ mod tests {
         }
 
         // Verify: messages after trim boundary are NOT trimmed
-        for i in trimmed_idx_1..result1.len() {
+        for (i, msg) in result1.iter().enumerate().skip(trimmed_idx_1) {
             assert!(
-                !is_trimmed(&result1[i]),
+                !is_trimmed(msg),
                 "Message {} (after trim boundary {}) should NOT be trimmed",
                 i,
                 trimmed_idx_1
@@ -1117,10 +1109,10 @@ mod tests {
 
         // Verify: the previously-trimmed prefix is still trimmed (stable for caching)
         // User messages are never trimmed, only assistant/tool messages
-        for i in 0..trimmed_idx_1 {
-            if result2[i].role != "user" {
+        for (i, msg) in result2.iter().enumerate().take(trimmed_idx_1) {
+            if msg.role != "user" {
                 assert!(
-                    is_trimmed(&result2[i]),
+                    is_trimmed(msg),
                     "Previously trimmed non-user message {} should still be trimmed",
                     i
                 );
@@ -1128,9 +1120,9 @@ mod tests {
         }
 
         // Verify: messages after trim boundary are NOT trimmed
-        for i in trimmed_idx_2..result2.len() {
+        for (i, msg) in result2.iter().enumerate().skip(trimmed_idx_2) {
             assert!(
-                !is_trimmed(&result2[i]),
+                !is_trimmed(msg),
                 "Message {} (after trim boundary {}) should NOT be trimmed after second trim",
                 i,
                 trimmed_idx_2
@@ -2310,7 +2302,7 @@ mod tests {
         // Print last 6 messages (what the agent actually works with)
         println!("\n--- Last 6 messages (agent's working context) ---");
         let len2 = result2.len();
-        let start = if len2 > 6 { len2 - 6 } else { 0 };
+        let start = len2.saturating_sub(6);
         for (i, msg) in result2[start..].iter().enumerate() {
             let content_preview = match &msg.content {
                 LLMMessageContent::String(s) => {

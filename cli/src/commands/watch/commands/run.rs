@@ -21,6 +21,9 @@ use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
 
+const HEARTBEAT_STALE_SECONDS: i64 = 120;
+const HEARTBEAT_UPDATE_INTERVAL_SECONDS: u64 = 30;
+
 /// Run the autopilot service in foreground mode.
 ///
 /// This function blocks until the autopilot service receives a shutdown signal (SIGTERM/SIGINT).
@@ -73,6 +76,36 @@ pub async fn run_scheduler() -> Result<(), String> {
     let db = ScheduleDb::new(db_path_str)
         .await
         .map_err(|e| format!("Failed to initialize database: {}", e))?;
+
+    let persisted_state = db.get_autopilot_state().await.map_err(|e| {
+        let _ = std::fs::remove_file(&pid_file_cleanup);
+        format!("Failed to read existing autopilot state: {}", e)
+    })?;
+
+    if let Err(message) = validate_prior_scheduler_state(persisted_state, Utc::now()) {
+        let _ = std::fs::remove_file(&pid_file_cleanup);
+        return Err(message);
+    }
+
+    // Crash recovery: stale in-progress runs can be left behind by hard crashes.
+    match db.clean_stale_runs().await {
+        Ok(0) => {}
+        Ok(count) => {
+            info!(count = count, "Cleaned stale runs from previous crash");
+            print_event(
+                "clean",
+                "autopilot",
+                &format!("Recovered {} stale run(s) from previous crash", count),
+            );
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&pid_file_cleanup);
+            return Err(format!(
+                "Failed to clean stale runs at startup (refusing to continue): {}",
+                e
+            ));
+        }
+    }
 
     // Set autopilot state
     db.set_autopilot_state(pid as i64)
@@ -139,6 +172,21 @@ pub async fn run_scheduler() -> Result<(), String> {
         }
     });
 
+    // Spawn heartbeat updater.
+    let db_heartbeat = Arc::clone(&db);
+    let heartbeat_updater = tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(HEARTBEAT_UPDATE_INTERVAL_SECONDS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            if let Err(e) = db_heartbeat.update_heartbeat().await {
+                warn!(error = %e, "Failed to update autopilot heartbeat");
+            }
+        }
+    });
+
     // Spawn pending schedule poller for manual schedule fires
     let db_clone2 = Arc::clone(&db);
     let config_clone2 = Arc::clone(&config);
@@ -202,8 +250,9 @@ pub async fn run_scheduler() -> Result<(), String> {
         warn!(error = %e, "Failed to shutdown scheduler");
     }
 
-    // Cancel event handler and pending poller
+    // Cancel event handler, heartbeat updater, and pending poller
     event_handler.abort();
+    heartbeat_updater.abort();
     pending_poller.abort();
 
     // Clear autopilot state
@@ -219,6 +268,40 @@ pub async fn run_scheduler() -> Result<(), String> {
     println!("\x1b[32mAutopilot stopped.\x1b[0m");
     info!("Autopilot stopped");
     Ok(())
+}
+
+fn validate_prior_scheduler_state(
+    state: Option<crate::commands::watch::db::SchedulerState>,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let Some(state) = state else {
+        return Ok(());
+    };
+
+    let Ok(pid) = u32::try_from(state.pid) else {
+        return Ok(());
+    };
+
+    if !is_process_running(pid) {
+        return Ok(());
+    }
+
+    let heartbeat_age_seconds = now
+        .signed_duration_since(state.last_heartbeat)
+        .num_seconds()
+        .max(0);
+
+    if heartbeat_age_seconds <= HEARTBEAT_STALE_SECONDS {
+        return Err(format!(
+            "Another autopilot instance appears active (PID {}, heartbeat {}s ago). Stop it first.",
+            state.pid, heartbeat_age_seconds
+        ));
+    }
+
+    Err(format!(
+        "Autopilot state PID {} is still running but heartbeat is stale ({}s). Refusing startup to avoid marking active runs as failed.",
+        state.pid, heartbeat_age_seconds
+    ))
 }
 
 /// Handle a schedule event by running the check script and spawning the agent if needed.
@@ -825,10 +908,37 @@ fn print_event(event_type: &str, trigger_name: &str, message: &str) {
         "done" => ("\x1b[32m", "OK"),
         "fail" => ("\x1b[31m", "XX"),
         "timeout" => ("\x1b[31m", "TO"),
+        "clean" => ("\x1b[34m", "RC"),
         _ => ("\x1b[0m", ".."),
     };
     println!(
         "{}{} [{}] {}: {}\x1b[0m",
         color, symbol, timestamp, trigger_name, message
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_prior_scheduler_state;
+    use crate::commands::watch::db::SchedulerState;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn test_validate_prior_scheduler_state_blocks_when_pid_running_and_heartbeat_fresh() {
+        let now = Utc::now();
+        let state = SchedulerState {
+            started_at: now - Duration::seconds(30),
+            pid: i64::from(std::process::id()),
+            last_heartbeat: now - Duration::seconds(5),
+        };
+
+        let result = validate_prior_scheduler_state(Some(state), now);
+        assert!(result.is_err());
+
+        let message = result.expect_err("expected active-instance guard error");
+        assert!(
+            message.contains("appears active"),
+            "unexpected guard message: {message}"
+        );
+    }
 }
