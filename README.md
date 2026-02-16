@@ -7,10 +7,10 @@
   </picture>
 </p>
 
-<h3 align="center">Secure Open source AI Agent in Your Terminal</h3>
+<h3 align="center">Ship your code, on autopilot.</h3>
 
 <p align="center">
-Infrastructure shouldn’t be this hard. Stakpak lets developers secure, deploy, and run infra from the terminal.
+An open source agent that lives on your machines 24/7, keeps your apps running, and only pings when it needs a human. All the upside of a PaaS, none of the lock-in.
 </p>
 
 <br />
@@ -38,6 +38,14 @@ Infrastructure shouldn’t be this hard. Stakpak lets developers secure, deploy,
 
 </p>
 
+### Try Stakpak Now
+```bash
+curl -sSL https://stakpak.dev/install.sh | sh
+stakpak init
+stakpak autopilot up
+```
+[For more installation options...](https://github.com/stakpak/agent#installation)
+
 You can't trust most AI agents with your DevOps. One mistake, and your production is toast.
 Stakpak is built different:
 - **Secret Substitution** - The LLM works with your credentials without ever seeing them
@@ -45,12 +53,6 @@ Stakpak is built different:
 - **DevOps Playbooks Baked-in** - Curated library of DevOps knowledge in Stakpak Rulebooks
 
 Generate infrastructure code, debug Kubernetes, configure CI/CD, automate deployments, without giving an LLM the keys to production.
-
-### Try Stakpak Now
-```bash
-curl -sSL https://stakpak.dev/install.sh | sh
-```
-[For more installation options...](https://github.com/stakpak/agent#installation)
 
 ### 🤖 Autopilot (24/7 Autonomous Runtime)
 
