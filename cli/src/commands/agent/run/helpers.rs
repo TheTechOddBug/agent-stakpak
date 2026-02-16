@@ -4,7 +4,31 @@ use stakpak_api::models::ListRuleBook;
 use stakpak_shared::models::integrations::openai::{
     ChatMessage, FunctionDefinition, MessageContent, Role, Tool, ToolCallResult,
 };
-use stakpak_shared::models::subagent::SubagentConfigs;
+use uuid::Uuid;
+
+/// Build a CLI resume command string, preferring session ID over checkpoint ID.
+pub fn build_resume_command(
+    session_id: Option<Uuid>,
+    checkpoint_id: Option<Uuid>,
+) -> Option<String> {
+    if let Some(session_id) = session_id {
+        return Some(format!("stakpak -s {}", session_id));
+    }
+    checkpoint_id.map(|checkpoint_id| format!("stakpak -c {}", checkpoint_id))
+}
+
+/// Extract the checkpoint ID from the last assistant message that contains one.
+pub fn extract_last_checkpoint_id(messages: &[ChatMessage]) -> Option<Uuid> {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::Assistant)
+        .find_map(|m| {
+            m.content
+                .as_ref()
+                .and_then(MessageContent::extract_checkpoint_id)
+        })
+}
 
 pub fn convert_tools_with_filter(
     tools: &[rmcp::model::Tool],
@@ -130,28 +154,6 @@ pub fn add_rulebooks(user_input: &str, rulebooks: &[ListRuleBook]) -> (String, O
         user_input, rulebooks_text
     );
     (formatted_input, Some(rulebooks_text))
-}
-
-pub fn add_subagents(
-    messages: &[ChatMessage],
-    user_input: &str,
-    subagent_configs: &Option<SubagentConfigs>,
-) -> (String, Option<String>) {
-    if let Some(subagent_configs) = subagent_configs {
-        let subagents_text = subagent_configs.format_for_context();
-
-        if messages.is_empty() {
-            let formatted_input = format!(
-                "{}\n<subagents>\n{}\n</subagents>",
-                user_input, subagents_text
-            );
-            (formatted_input, Some(subagents_text))
-        } else {
-            (user_input.to_string(), None)
-        }
-    } else {
-        (user_input.to_string(), None)
-    }
 }
 
 pub fn tool_call_history_string(tool_calls: &[ToolCallResult]) -> Option<String> {

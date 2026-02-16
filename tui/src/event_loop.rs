@@ -13,7 +13,8 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal::EnterAlternateScreen};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use stakpak_shared::models::integrations::openai::{AgentModel, ToolCallResultStatus};
+use stakai::Model;
+use stakpak_shared::models::integrations::openai::ToolCallResultStatus;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,9 +48,11 @@ pub async fn run_tui(
     allowed_tools: Option<&Vec<String>>,
     current_profile_name: String,
     rulebook_config: Option<RulebookConfig>,
-    agent_model: AgentModel,
+    model: Model,
     editor_command: Option<String>,
     auth_display_info: (Option<String>, Option<String>, Option<String>),
+    init_prompt_content: Option<String>,
+    send_init_prompt_on_start: bool,
 ) -> io::Result<()> {
     let _guard = TerminalGuard;
 
@@ -86,10 +89,11 @@ pub async fn run_tui(
         auto_approve_tools,
         allowed_tools,
         input_tx: Some(internal_tx.clone()),
-        agent_model,
+        model,
         editor_command,
         auth_display_info,
         board_agent_id,
+        init_prompt_content,
     });
 
     // Mouse capture is always enabled
@@ -119,6 +123,16 @@ pub async fn run_tui(
     // Trigger initial board tasks refresh if agent ID is configured
     if state.board_agent_id.is_some() {
         let _ = internal_tx.try_send(InputEvent::RefreshBoardTasks);
+    }
+
+    // When started via `stakpak init`, add init prompt as user message and send to backend
+    if send_init_prompt_on_start
+        && let Some(prompt) = state.init_prompt_content.clone()
+        && !prompt.trim().is_empty()
+    {
+        state.messages.push(Message::user(prompt.clone(), None));
+        crate::services::message::invalidate_message_lines_cache(&mut state);
+        let _ = output_tx.try_send(OutputEvent::UserMessage(prompt, None, Vec::new()));
     }
 
     let internal_tx_thread = internal_tx.clone();
@@ -282,13 +296,13 @@ pub async fn run_tui(
                                 }
                                 "read" | "view" | "read_file" => {
                                     // View file tool - show compact view with file icon and line count
-                                    // Extract file path from tool call arguments
-                                    let file_path = crate::services::handlers::tool::extract_file_path_from_tool_call(&tool_call_result.call)
-                                        .unwrap_or_else(|| "file".to_string());
+                                    // Extract file path and optional grep/glob from tool call arguments
+                                    let (file_path, grep, glob) = crate::services::handlers::tool::extract_view_params_from_tool_call(&tool_call_result.call);
+                                    let file_path = file_path.unwrap_or_else(|| "file".to_string());
                                     let total_lines = tool_call_result.result.lines().count();
-                                    state.messages.push(Message::render_view_file_block(file_path.clone(), total_lines));
+                                    state.messages.push(Message::render_view_file_block(file_path.clone(), total_lines, grep.clone(), glob.clone()));
                                     // Full screen popup: same compact view without borders
-                                    state.messages.push(Message::render_view_file_block_popup(file_path, total_lines));
+                                    state.messages.push(Message::render_view_file_block_popup(file_path, total_lines, grep, glob));
                                 }
                                _ => {
                                    // TUI: collapsed command message - last 3 lines (is_collapsed: None)

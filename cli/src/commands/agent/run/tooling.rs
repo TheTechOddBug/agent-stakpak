@@ -3,7 +3,7 @@ use rmcp::model::{
     ServerResult,
 };
 use stakpak_api::AgentProvider;
-use stakpak_api::models::AgentSession;
+use stakpak_api::storage::ListSessionsQuery;
 use stakpak_mcp_client::McpClient;
 use stakpak_shared::models::integrations::mcp::CallToolResultExt;
 use stakpak_shared::models::integrations::openai::ToolCall;
@@ -11,41 +11,25 @@ use stakpak_tui::SessionInfo;
 use uuid::Uuid;
 
 pub async fn list_sessions(client: &dyn AgentProvider) -> Result<Vec<SessionInfo>, String> {
-    let sessions: Vec<AgentSession> = client.list_agent_sessions().await?;
+    let result = client
+        .list_sessions(&ListSessionsQuery::new())
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let mut session_infos: Vec<(SessionInfo, chrono::DateTime<chrono::Utc>)> = sessions
+    let session_infos: Vec<SessionInfo> = result
+        .sessions
         .into_iter()
-        .map(|s| {
-            let mut checkpoints = s.checkpoints.clone();
-            checkpoints.sort_by_key(|c| c.updated_at);
-
-            // Get the last checkpoint's updated_at for sorting
-            let last_checkpoint_timestamp = checkpoints
-                .last()
-                .map(|c| c.updated_at)
-                .unwrap_or(s.updated_at);
-
-            let session_info = SessionInfo {
-                id: s.id.to_string(),
-                title: s.title,
-                updated_at: s.updated_at.to_string(),
-                checkpoints: checkpoints.iter().map(|c| c.id.to_string()).collect(),
-            };
-
-            (session_info, last_checkpoint_timestamp)
+        .map(|s| SessionInfo {
+            id: s.id.to_string(),
+            title: s.title,
+            updated_at: s.updated_at.to_string(),
+            checkpoints: s
+                .active_checkpoint_id
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
         })
         .collect();
 
-    session_infos.sort_by_key(|(_, timestamp)| *timestamp);
-    session_infos.reverse(); // Reverse to get most recent sessions at the top
-
-    let session_infos: Vec<SessionInfo> = session_infos
-        .into_iter()
-        .map(|(mut session_info, last_checkpoint_timestamp)| {
-            session_info.updated_at = last_checkpoint_timestamp.to_string();
-            session_info
-        })
-        .collect();
     Ok(session_infos)
 }
 
@@ -55,6 +39,7 @@ pub async fn run_tool_call(
     tool_call: &ToolCall,
     cancel_rx: Option<tokio::sync::broadcast::Receiver<()>>,
     session_id: Option<Uuid>,
+    model_id: Option<String>,
 ) -> Result<Option<CallToolResult>, String> {
     let tool_name = &tool_call.function.name;
     let tool_exists = tools.iter().any(|tool| tool.name == *tool_name);
@@ -74,13 +59,26 @@ pub async fn run_tool_call(
         };
 
         // Call tool and handle errors gracefully
+        let metadata = Some({
+            let mut meta = serde_json::Map::new();
+            if let Some(session_id) = session_id {
+                meta.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(session_id.to_string()),
+                );
+            }
+            if let Some(model_id) = model_id {
+                meta.insert("model_id".to_string(), serde_json::Value::String(model_id));
+            }
+            meta
+        });
         let handle = match stakpak_mcp_client::call_tool(
             mcp_client,
             CallToolRequestParam {
                 name: tool_name.clone().into(),
                 arguments,
             },
-            session_id,
+            metadata,
         )
         .await
         {
@@ -120,7 +118,6 @@ pub async fn run_tool_call(
                         Err(e) => {
                             let error_msg = format!("MCP tool execution error: {}", e);
                             log::error!("{}", error_msg);
-                            // Return error result instead of panicking
                             return Ok(Some(CallToolResult::error(vec![
                                 rmcp::model::Content::text("MCP_ERROR"),
                                 rmcp::model::Content::text(error_msg),
@@ -159,7 +156,6 @@ pub async fn run_tool_call(
                 Err(e) => {
                     let error_msg = format!("MCP tool execution error: {}", e);
                     log::error!("{}", error_msg);
-                    // Return error result instead of panicking
                     return Ok(Some(CallToolResult::error(vec![
                         rmcp::model::Content::text("MCP_ERROR"),
                         rmcp::model::Content::text(error_msg),

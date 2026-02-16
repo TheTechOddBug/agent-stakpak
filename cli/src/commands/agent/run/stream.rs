@@ -1,12 +1,14 @@
 use crate::commands::agent::run::tui::send_input_event;
 use futures_util::{Stream, StreamExt};
+use stakai::Model;
 use stakpak_api::models::ApiStreamError;
 use stakpak_shared::models::{
     integrations::openai::{
         ChatCompletionChoice, ChatCompletionResponse, ChatCompletionStreamResponse, ChatMessage,
         FinishReason, FunctionCall, MessageContent, Role, ToolCall, ToolCallDelta,
+        ToolCallStreamInfo,
     },
-    llm::{LLMModel, LLMTokenUsage},
+    llm::LLMTokenUsage,
 };
 use stakpak_tui::{InputEvent, LoadingOperation};
 use uuid::Uuid;
@@ -19,19 +21,19 @@ use uuid::Uuid;
 ///
 /// This distinction is important because some providers (like Anthropic via StakAI adapter)
 /// send multiple tool calls with the same index but different IDs.
-struct ToolCallAccumulator {
+pub struct ToolCallAccumulator {
     tool_calls: Vec<ToolCall>,
 }
 
 impl ToolCallAccumulator {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tool_calls: Vec::new(),
         }
     }
 
     /// Process a tool call delta and accumulate it into the appropriate tool call.
-    fn process_delta(&mut self, delta: &ToolCallDelta) {
+    pub fn process_delta(&mut self, delta: &ToolCallDelta) {
         let delta_id = delta.id.as_deref().filter(|id| !id.is_empty());
         let delta_func = delta.function.as_ref();
 
@@ -47,6 +49,10 @@ impl ToolCallAccumulator {
                     if let Some(args) = &func.arguments {
                         tool_call.function.arguments.push_str(args);
                     }
+                }
+                // Merge metadata (later deltas can carry metadata, e.g. ToolCallEnd)
+                if delta.metadata.is_some() {
+                    tool_call.metadata = delta.metadata.clone();
                 }
             }
             None => {
@@ -78,6 +84,7 @@ impl ToolCallAccumulator {
                     name: String::new(),
                     arguments: String::new(),
                 },
+                metadata: None,
             });
         }
 
@@ -89,14 +96,36 @@ impl ToolCallAccumulator {
                 name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
                 arguments: func.and_then(|f| f.arguments.clone()).unwrap_or_default(),
             },
+            metadata: delta.metadata.clone(),
         });
     }
 
     /// Get the accumulated tool calls, filtering out empty placeholders.
-    fn into_tool_calls(self) -> Vec<ToolCall> {
+    pub fn into_tool_calls(self) -> Vec<ToolCall> {
         self.tool_calls
             .into_iter()
             .filter(|tc| !tc.id.is_empty())
+            .collect()
+    }
+
+    /// Get a snapshot of current streaming progress for each tool call.
+    /// Used to send progress updates to the TUI during streaming.
+    pub fn progress_snapshot(&self) -> Vec<ToolCallStreamInfo> {
+        self.tool_calls
+            .iter()
+            .filter(|tc| !tc.id.is_empty())
+            .map(|tc| {
+                // Best-effort: try to extract "description" from partial JSON args
+                let description = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    .ok()
+                    .and_then(|v| v.get("description")?.as_str().map(String::from));
+
+                ToolCallStreamInfo {
+                    name: tc.function.name.clone(),
+                    args_tokens: tc.function.arguments.len() / 4, // rough chars-to-tokens estimate
+                    description,
+                }
+            })
             .collect()
     }
 }
@@ -122,8 +151,9 @@ pub async fn process_responses_stream(
         system_fingerprint: None,
         metadata: None,
     };
+    let mut response_metadata: Option<serde_json::Value> = None;
 
-    let mut llm_model: Option<LLMModel> = None;
+    let mut current_model: Option<Model> = None;
 
     let mut chat_message = ChatMessage {
         role: Role::Assistant,
@@ -154,23 +184,31 @@ pub async fn process_responses_stream(
                     // Send usage to TUI for display immediately when we receive it
                     send_input_event(input_tx, InputEvent::StreamUsage(usage.clone())).await?;
                 }
+                if let Some(metadata) = &response.metadata {
+                    response_metadata = Some(metadata.clone());
+                }
+
+                // Skip chunks with no choices (e.g., usage-only events)
+                if response.choices.is_empty() {
+                    continue;
+                }
 
                 let delta = &response.choices[0].delta;
                 if !response.model.is_empty() {
-                    let current_model: LLMModel = response.model.clone().into();
-                    match &llm_model {
-                        Some(model) => {
-                            if *model != current_model {
-                                llm_model = Some(current_model.clone());
-                                send_input_event(input_tx, InputEvent::StreamModel(current_model))
-                                    .await?;
-                            }
-                        }
-                        None => {
-                            llm_model = Some(current_model.clone());
-                            send_input_event(input_tx, InputEvent::StreamModel(current_model))
-                                .await?;
-                        }
+                    // Look up the model in the catalog to get proper display name
+                    // Use false for use_stakpak since the response already has the resolved model ID
+                    let model = stakpak_api::find_model(&response.model, false)
+                        .unwrap_or_else(|| Model::custom(response.model.clone(), "unknown"));
+
+                    // Only send event if model changed
+                    let should_send = match &current_model {
+                        Some(existing) => existing.id != model.id,
+                        None => true,
+                    };
+
+                    if should_send {
+                        current_model = Some(model.clone());
+                        send_input_event(input_tx, InputEvent::StreamModel(model)).await?;
                     }
                 }
 
@@ -178,9 +216,9 @@ pub async fn process_responses_stream(
                     id: response.id.clone(),
                     object: response.object.clone(),
                     created: response.created,
-                    model: llm_model
-                        .clone()
-                        .map(|model| model.to_string())
+                    model: current_model
+                        .as_ref()
+                        .map(|m| m.id.clone())
                         .unwrap_or_default(),
                     choices: vec![],
                     usage: chat_completion_response.usage.clone(),
@@ -205,6 +243,12 @@ pub async fn process_responses_stream(
                 if let Some(tool_calls) = &delta.tool_calls {
                     for delta_tool_call in tool_calls {
                         tool_call_accumulator.process_delta(delta_tool_call);
+                    }
+                    // Send streaming progress to TUI so users see what's being generated
+                    let snapshot = tool_call_accumulator.progress_snapshot();
+                    if !snapshot.is_empty() {
+                        send_input_event(input_tx, InputEvent::StreamToolCallProgress(snapshot))
+                            .await?;
                     }
                 }
             }
@@ -234,6 +278,7 @@ pub async fn process_responses_stream(
         finish_reason: FinishReason::Stop,
         logprobs: None,
     });
+    chat_completion_response.metadata = response_metadata;
 
     // End stream processing loading when stream completes
     send_input_event(
@@ -275,6 +320,7 @@ mod tests {
                         id,
                         r#type: Some("function".to_string()),
                         function: Some(FunctionCallDelta { name, arguments }),
+                        metadata: None,
                     }]),
                 },
                 finish_reason: None,
@@ -282,6 +328,187 @@ mod tests {
             usage: None,
             metadata: None,
         }
+    }
+
+    fn create_content_response(content: &str) -> ChatCompletionStreamResponse {
+        ChatCompletionStreamResponse {
+            id: "test".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test-model".to_string(),
+            choices: vec![ChatCompletionStreamChoice {
+                index: 0,
+                delta: ChatMessageDelta {
+                    role: None,
+                    content: Some(content.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+            metadata: None,
+        }
+    }
+
+    fn create_usage_only_response() -> ChatCompletionStreamResponse {
+        ChatCompletionStreamResponse {
+            id: "test".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "".to_string(),
+            choices: vec![], // Empty choices — usage-only event
+            usage: Some(LLMTokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                prompt_tokens_details: None,
+            }),
+            metadata: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_choices_does_not_panic() {
+        // This is the exact scenario that caused the index-out-of-bounds panic:
+        // Some providers send a final event with usage data but no choices.
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses = vec![
+            Ok(create_content_response("Hello")),
+            Ok(create_usage_only_response()), // Empty choices — was panicking
+        ];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        // Content should still be accumulated from the first chunk
+        let content = response.choices[0]
+            .message
+            .content
+            .as_ref()
+            .unwrap()
+            .to_string();
+        assert_eq!(content, "Hello");
+        // Usage from the empty-choices event should still be captured
+        assert_eq!(response.usage.prompt_tokens, 100);
+        assert_eq!(response.usage.completion_tokens, 50);
+        assert_eq!(response.usage.total_tokens, 150);
+    }
+
+    #[tokio::test]
+    async fn test_only_usage_events_no_content() {
+        // Stream with only usage events and no content at all
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses = vec![Ok(create_usage_only_response())];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        assert!(response.choices[0].message.content.is_none());
+        assert!(response.choices[0].message.tool_calls.is_none());
+        assert_eq!(response.usage.total_tokens, 150);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_empty_choices_interspersed() {
+        // Multiple empty-choices events interspersed with content
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses = vec![
+            Ok(create_usage_only_response()),
+            Ok(create_content_response("Hello")),
+            Ok(create_usage_only_response()),
+            Ok(create_content_response(" World")),
+            Ok(create_usage_only_response()),
+        ];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let content = response.choices[0]
+            .message
+            .content
+            .as_ref()
+            .unwrap()
+            .to_string();
+        assert_eq!(content, "Hello World");
+    }
+
+    #[tokio::test]
+    async fn test_empty_stream() {
+        // Completely empty stream — no events at all
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses: Vec<Result<ChatCompletionStreamResponse, ApiStreamError>> = vec![];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        // Should have one choice with empty content
+        assert_eq!(response.choices.len(), 1);
+        assert!(response.choices[0].message.content.is_none());
+        assert!(response.choices[0].message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_content_accumulation_across_chunks() {
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses = vec![
+            Ok(create_content_response("Hello")),
+            Ok(create_content_response(", ")),
+            Ok(create_content_response("world")),
+            Ok(create_content_response("!")),
+        ];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        let content = response.choices[0]
+            .message
+            .content
+            .as_ref()
+            .unwrap()
+            .to_string();
+        assert_eq!(content, "Hello, world!");
+    }
+
+    #[tokio::test]
+    async fn test_stream_error_propagated() {
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(100);
+
+        let responses: Vec<Result<ChatCompletionStreamResponse, ApiStreamError>> = vec![
+            Ok(create_content_response("start")),
+            Err(ApiStreamError::Unknown("connection lost".to_string())),
+        ];
+
+        let test_stream = stream::iter(responses);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+
+        let result = process_responses_stream(test_stream, &input_tx).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

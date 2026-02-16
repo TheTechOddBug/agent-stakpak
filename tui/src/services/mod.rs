@@ -19,6 +19,7 @@ pub mod markdown_renderer;
 pub mod message;
 pub mod message_action_popup;
 pub mod message_pattern;
+pub mod model_switcher;
 pub mod placeholder_prompts;
 pub mod profile_switcher;
 pub mod rulebook_switcher;

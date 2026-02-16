@@ -124,7 +124,10 @@ pub struct SearchClient {
 impl SearchClient {
     pub fn new(api_url: String) -> Self {
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(MAX_RETRIES);
-        let client = ClientBuilder::new(reqwest::Client::new())
+        let base_client =
+            crate::tls_client::create_tls_client(crate::tls_client::TlsClientConfig::default())
+                .expect("Failed to create TLS client for search service");
+        let client = ClientBuilder::new(base_client)
             .with(RetryTransientMiddleware::new_with_policy(retry_policy))
             .build();
 

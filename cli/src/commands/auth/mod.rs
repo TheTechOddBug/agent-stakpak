@@ -22,13 +22,25 @@ use std::path::PathBuf;
 pub enum AuthCommands {
     /// Login to an LLM provider
     Login {
-        /// Provider to authenticate with (e.g., "anthropic", "stakpak")
-        #[arg(long)]
-        provider: Option<String>,
+        /// Provider to authenticate with (e.g., "anthropic", "openai", "gemini", "stakpak", "amazon-bedrock")
+        #[arg(long, default_value = "stakpak")]
+        provider: String,
 
-        /// Profile to save credentials to (default: "all" for shared)
+        /// Profile to save credentials to
         #[arg(long, short)]
         profile: Option<String>,
+
+        /// API key for non-interactive setup
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// AWS region for Bedrock provider (e.g., "us-east-1")
+        #[arg(long)]
+        region: Option<String>,
+
+        /// AWS named profile for Bedrock provider (from ~/.aws/config)
+        #[arg(long)]
+        profile_name: Option<String>,
     },
 
     /// Logout from an LLM provider
@@ -57,8 +69,22 @@ impl AuthCommands {
         let config_dir = get_config_dir(&config)?;
 
         match self {
-            AuthCommands::Login { provider, profile } => {
-                login::handle_login(&config_dir, provider.as_deref(), profile.as_deref()).await
+            AuthCommands::Login {
+                provider,
+                profile,
+                api_key,
+                region,
+                profile_name,
+            } => {
+                login::handle_login(
+                    &config_dir,
+                    &provider,
+                    profile.as_deref(),
+                    api_key,
+                    region,
+                    profile_name,
+                )
+                .await
             }
             AuthCommands::Logout { provider, profile } => {
                 logout::handle_logout(&config_dir, provider.as_deref(), profile.as_deref())

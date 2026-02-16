@@ -63,7 +63,12 @@ pub fn handle_stream_message(
         state
             .messages
             .push(Message::assistant(Some(id), s.clone(), None));
-        state.text_area.set_text("");
+
+        // Invalidate cache since messages changed
+        invalidate_message_lines_cache(state);
+
+        // Note: Don't clear input here - it was already cleared when user submitted their message.
+        // Clearing here would wipe out any new input the user started typing while waiting for the response.
 
         if !was_at_bottom {
             state.content_changed_while_scrolled_up = true;
@@ -74,6 +79,7 @@ pub fn handle_stream_message(
 
         let total_lines = state.messages.len() * 2;
         let max_scroll = total_lines.saturating_sub(max_visible_lines);
+
         if was_at_bottom {
             state.scroll = max_scroll;
             state.scroll_to_bottom = true;

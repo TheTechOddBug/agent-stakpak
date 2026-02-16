@@ -4,8 +4,9 @@ use crate::commands::agent::run::checkpoint::{
     get_checkpoint_messages, resume_session_from_checkpoint,
 };
 use crate::commands::agent::run::helpers::{
-    add_agents_md, add_local_context, add_rulebooks, add_subagents, convert_tools_with_filter,
-    refresh_billing_info, tool_call_history_string, tool_result, user_message,
+    add_agents_md, add_local_context, add_rulebooks, build_resume_command,
+    extract_last_checkpoint_id, refresh_billing_info, tool_call_history_string, tool_result,
+    user_message,
 };
 use crate::commands::agent::run::mcp_init;
 use crate::commands::agent::run::renderer::{OutputFormat, OutputRenderer};
@@ -19,15 +20,18 @@ use crate::utils::check_update::get_latest_cli_version;
 use crate::utils::local_context::LocalContext;
 use reqwest::header::HeaderMap;
 use stakpak_api::models::ApiStreamError;
-use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, models::ListRuleBook};
+use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, Model, models::ListRuleBook};
 
 use stakpak_mcp_server::EnabledToolsConfig;
 use stakpak_shared::models::integrations::mcp::CallToolResultExt;
 use stakpak_shared::models::integrations::openai::{
-    AgentModel, ChatMessage, MessageContent, Role, ToolCall, ToolCallResultStatus,
+    ChatMessage, MessageContent, Role, ToolCall, ToolCallResultStatus,
 };
 use stakpak_shared::models::llm::{LLMTokenUsage, PromptTokensDetails};
-use stakpak_shared::models::subagent::SubagentConfigs;
+
+/// Bundled infrastructure analysis prompt (embedded at compile time)
+/// analyze the infrastructure and provide a summary of the current state
+const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v2.md");
 use stakpak_shared::telemetry::{TelemetryEvent, capture_event};
 use stakpak_tui::{InputEvent, LoadingOperation, OutputEvent};
 use std::sync::Arc;
@@ -43,13 +47,79 @@ type ClientTaskResult = Result<
     String,
 >;
 
+async fn start_stream_processing_loading(
+    input_tx: &tokio::sync::mpsc::Sender<InputEvent>,
+) -> Result<(), String> {
+    send_input_event(
+        input_tx,
+        InputEvent::StartLoadingOperation(LoadingOperation::StreamProcessing),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn end_tool_execution_loading_if_none(
+    has_result: bool,
+    input_tx: &tokio::sync::mpsc::Sender<InputEvent>,
+) -> Result<(), String> {
+    if !has_result {
+        send_input_event(
+            input_tx,
+            InputEvent::EndLoadingOperation(LoadingOperation::ToolExecution),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Returns the IDs of tool_calls from the last assistant message that don't have corresponding tool_results.
+/// This is used to add cancelled tool_results before inserting a user message.
+fn get_unresolved_tool_call_ids(messages: &[ChatMessage]) -> Vec<String> {
+    // Find the last assistant message and check if it has tool_calls
+    if let Some(last_assistant_msg) = messages.iter().rev().find(|m| m.role == Role::Assistant)
+        && let Some(tool_calls) = &last_assistant_msg.tool_calls
+        && !tool_calls.is_empty()
+    {
+        // Collect all tool_result IDs from messages
+        let tool_result_ids: std::collections::HashSet<_> = messages
+            .iter()
+            .filter(|m| m.role == Role::Tool && m.tool_call_id.is_some())
+            .filter_map(|m| m.tool_call_id.as_ref())
+            .collect();
+
+        // Return tool_call IDs that don't have corresponding tool_results
+        return tool_calls
+            .iter()
+            .filter(|tc| !tool_result_ids.contains(&tc.id))
+            .map(|tc| tc.id.clone())
+            .collect();
+    }
+
+    Vec::new()
+}
+
+/// Checks if there are pending tool calls that don't have corresponding tool_results.
+/// This is used to prevent sending messages to the API when tool_use blocks would be orphaned,
+/// which causes Anthropic API 400 errors.
+fn has_pending_tool_calls(messages: &[ChatMessage], tools_queue: &[ToolCall]) -> bool {
+    // If there are tools in the queue waiting to be processed, we have pending tool calls
+    if !tools_queue.is_empty() {
+        return true;
+    }
+
+    // Check if there are unresolved tool_calls in the messages
+    !get_unresolved_tool_call_ids(messages).is_empty()
+}
+
 pub struct RunInteractiveConfig {
     pub checkpoint_id: Option<String>,
+    pub session_id: Option<String>,
     pub local_context: Option<LocalContext>,
     pub redact_secrets: bool,
     pub privacy_mode: bool,
     pub rulebooks: Option<Vec<ListRuleBook>>,
-    pub subagent_configs: Option<SubagentConfigs>,
+    pub enable_subagents: bool,
     pub enable_mtls: bool,
     pub is_git_repo: bool,
     pub study_mode: bool,
@@ -57,8 +127,10 @@ pub struct RunInteractiveConfig {
     pub allowed_tools: Option<Vec<String>>,
     pub auto_approve: Option<Vec<String>>,
     pub enabled_tools: EnabledToolsConfig,
-    pub model: AgentModel,
+    pub model: Model,
     pub agents_md: Option<AgentsMdInfo>,
+    /// When true, send init_prompt_content as first user message on session start (stakpak init)
+    pub send_init_prompt_on_start: bool,
 }
 
 pub async fn run_interactive(
@@ -88,9 +160,10 @@ pub async fn run_interactive(
         let mut rulebooks = config.rulebooks.clone();
         let mut all_available_rulebooks: Option<Vec<ListRuleBook>> = None;
         let system_prompt = config.system_prompt.clone();
-        let subagent_configs = config.subagent_configs.clone();
+        let enable_subagents = config.enable_subagents;
         let agents_md = config.agents_md.clone();
         let checkpoint_id = config.checkpoint_id.clone();
+        let session_id = config.session_id.clone();
         let allowed_tools = config.allowed_tools.clone();
         let auto_approve = config.auto_approve.clone();
         let enabled_tools = config.enabled_tools.clone();
@@ -118,8 +191,13 @@ pub async fn run_interactive(
         });
         let editor_command = ctx.editor.clone();
 
-        let model_clone = model.clone();
         let auth_display_info_for_tui = ctx.get_auth_display_info();
+        let model_for_tui = model.clone();
+
+        // Use  init prompt (loaded at module level as const)
+        let init_prompt_content_for_tui = Some(INIT_PROMPT.to_string());
+
+        let send_init_prompt_on_start = config.send_init_prompt_on_start;
         let tui_handle = tokio::spawn(async move {
             let latest_version = get_latest_cli_version().await;
             stakpak_tui::run_tui(
@@ -135,19 +213,35 @@ pub async fn run_interactive(
                 allowed_tools.as_ref(),
                 current_profile_for_tui,
                 rulebook_config_for_tui,
-                model_clone,
+                model_for_tui,
                 editor_command,
                 auth_display_info_for_tui,
+                init_prompt_content_for_tui,
+                send_init_prompt_on_start,
             )
             .await
             .map_err(|e| e.to_string())
         });
 
         let input_tx_clone = input_tx.clone();
+        let mut shutdown_rx_for_progress = shutdown_tx.subscribe();
         let mcp_progress_handle = tokio::spawn(async move {
-            while let Some(progress) = mcp_progress_rx.recv().await {
-                let _ =
-                    send_input_event(&input_tx_clone, InputEvent::StreamToolResult(progress)).await;
+            loop {
+                tokio::select! {
+                    maybe_progress = mcp_progress_rx.recv() => {
+                        let Some(progress) = maybe_progress else {
+                            break;
+                        };
+                        let _ = send_input_event(
+                            &input_tx_clone,
+                            InputEvent::StreamToolResult(progress),
+                        )
+                        .await;
+                    }
+                    _ = shutdown_rx_for_progress.recv() => {
+                        break;
+                    }
+                }
             }
         });
 
@@ -157,6 +251,7 @@ pub async fn run_interactive(
         let ctx_clone = ctx.clone(); // Clone ctx for use in client task
         let client_handle: tokio::task::JoinHandle<ClientTaskResult> = tokio::spawn(async move {
             let mut current_session_id: Option<Uuid> = None;
+            let mut current_metadata: Option<serde_json::Value> = None;
 
             // Build unified AgentClient config
             let providers = ctx_clone.get_llm_provider_config();
@@ -189,8 +284,11 @@ pub async fn run_interactive(
                 privacy_mode,
                 enabled_tools: enabled_tools.clone(),
                 enable_mtls,
+                enable_subagents,
+                allowed_tools: allowed_tools_for_tui.clone(),
             };
-            let (mcp_client, mcp_tools, _tools, _server_shutdown_tx, _proxy_shutdown_tx) =
+            // Tools are already filtered by initialize_mcp_server_and_tools (same as async mode)
+            let (mcp_client, mcp_tools, tools, _server_shutdown_tx, _proxy_shutdown_tx) =
                 match mcp_init::initialize_mcp_server_and_tools(
                     &ctx_clone,
                     mcp_init_config,
@@ -213,8 +311,6 @@ pub async fn run_interactive(
                         (None, Vec::new(), Vec::new(), None, None)
                     }
                 };
-
-            let tools = convert_tools_with_filter(&mcp_tools, allowed_tools_for_tui.as_ref());
 
             let data = client.get_my_account().await?;
             send_input_event(&input_tx, InputEvent::GetStatus(data.to_text())).await?;
@@ -241,7 +337,25 @@ pub async fn run_interactive(
                     send_input_event(&input_tx, InputEvent::RulebooksLoaded(all_rulebooks)).await;
             }
 
-            if let Some(checkpoint_id_str) = checkpoint_id {
+            if let Some(session_id_str) = session_id {
+                let (chat_messages, tool_calls, session_id_uuid, checkpoint_metadata) =
+                    resume_session_from_checkpoint(client.as_ref(), &session_id_str, &input_tx)
+                        .await?;
+
+                current_session_id = Some(session_id_uuid);
+                current_metadata = checkpoint_metadata;
+                should_update_rulebooks_on_next_message = true;
+                tools_queue.extend(tool_calls.clone());
+
+                if !tools_queue.is_empty() {
+                    send_input_event(&input_tx, InputEvent::MessageToolCalls(tools_queue.clone()))
+                        .await?;
+                    let initial_tool_call = tools_queue.remove(0);
+                    send_tool_call(&input_tx, &initial_tool_call).await?;
+                }
+
+                messages.extend(chat_messages);
+            } else if let Some(checkpoint_id_str) = checkpoint_id {
                 // Try to get session ID from checkpoint
                 let checkpoint_uuid = Uuid::parse_str(&checkpoint_id_str).map_err(|_| {
                     format!(
@@ -251,14 +365,13 @@ pub async fn run_interactive(
                 })?;
 
                 // Try to get the checkpoint with session info
-                if let Ok(checkpoint_with_session) =
-                    client.get_agent_checkpoint(checkpoint_uuid).await
-                {
-                    current_session_id = Some(checkpoint_with_session.session.id);
+                if let Ok(checkpoint) = client.get_checkpoint(checkpoint_uuid).await {
+                    current_session_id = Some(checkpoint.session_id);
                 }
 
-                let checkpoint_messages =
+                let (checkpoint_messages, checkpoint_metadata) =
                     get_checkpoint_messages(client.as_ref(), &checkpoint_id_str).await?;
+                current_metadata = checkpoint_metadata;
 
                 let (chat_messages, tool_calls) = extract_checkpoint_messages_and_tool_calls(
                     &checkpoint_id_str,
@@ -288,7 +401,7 @@ pub async fn run_interactive(
 
             while let Some(output_event) = output_rx.recv().await {
                 match output_event {
-                    OutputEvent::SwitchModel(new_model) => {
+                    OutputEvent::SwitchToModel(new_model) => {
                         model = new_model;
                         continue;
                     }
@@ -326,9 +439,6 @@ pub async fn run_interactive(
                                 (user_input.to_string(), None::<String>)
                             };
 
-                        let (user_input, _) =
-                            add_subagents(&messages, &user_input, &subagent_configs);
-
                         let user_input = if messages.is_empty()
                             && let Some(agents_md_info) = &agents_md
                         {
@@ -365,7 +475,25 @@ pub async fn run_interactive(
                         };
 
                         send_input_event(&input_tx, InputEvent::HasUserMessage).await?;
-                        tools_queue.clear();
+                        // Add tool_result for any remaining queued tool calls before clearing.
+                        // Without this, assistant messages containing tool_use blocks for these
+                        // calls would be orphaned (no matching tool_result), causing Anthropic
+                        // API 400 errors on the next request.
+                        for abandoned_tool in tools_queue.drain(..) {
+                            messages.push(tool_result(
+                                abandoned_tool.id,
+                                "TOOL_CALL_CANCELLED".to_string(),
+                            ));
+                        }
+                        // Also add cancelled results for any tool_calls that are currently being
+                        // executed (already removed from queue but not yet resolved).
+                        // This prevents user messages from being inserted between tool_use and tool_result.
+                        for unresolved_id in get_unresolved_tool_call_ids(&messages) {
+                            messages.push(tool_result(
+                                unresolved_id,
+                                "TOOL_CALL_CANCELLED".to_string(),
+                            ));
+                        }
                         messages.push(user_msg);
 
                         // Capture telemetry when not using Stakpak API (local mode)
@@ -394,6 +522,7 @@ pub async fn run_interactive(
                                 &tool_call,
                                 Some(cancel_rx.resubscribe()),
                                 current_session_id,
+                                Some(model.id.clone()),
                             )
                             .await?
                         } else {
@@ -401,56 +530,84 @@ pub async fn run_interactive(
                         };
 
                         let mut should_stop = false;
+                        let has_result = result.is_some();
 
                         if let Some(result) = result {
-                            let content_parts: Vec<String> = result
-                                .content
-                                .iter()
-                                .map(|c| match c.raw.as_text() {
-                                    Some(text) => text.text.clone(),
-                                    None => String::new(),
-                                })
-                                .filter(|s| !s.is_empty())
-                                .collect();
+                            let is_cancelled =
+                                result.get_status() == ToolCallResultStatus::Cancelled;
 
-                            let result_content = if result.get_status()
-                                == ToolCallResultStatus::Error
-                                && content_parts.len() >= 2
-                            {
-                                // For error cases, preserve the original formatting
-                                let error_message = content_parts[1..].join(": ");
-                                format!("[{}] {}", content_parts[0], error_message)
-                            } else {
-                                content_parts.join("\n")
-                            };
+                            // Don't push a tool_result for cancelled tool calls
+                            // when there are no more tools queued — the retry/shell
+                            // flow will send a SendToolResult event with the final
+                            // result later.  However, if there ARE queued tools we
+                            // must record a CANCELLED placeholder so the tool_use
+                            // block is not left orphaned when the next tool completes
+                            // and triggers an API call.
+                            if is_cancelled && !tools_queue.is_empty() {
+                                messages.push(tool_result(
+                                    tool_call.clone().id,
+                                    "TOOL_CALL_CANCELLED".to_string(),
+                                ));
+                            }
+                            if !is_cancelled {
+                                // If a CANCELLED result was already inserted for this tool_call
+                                // (e.g., user sent a message while the tool was in-flight),
+                                // skip adding the real result to avoid duplicate tool_call_ids.
+                                let already_resolved = messages.iter().any(|m| {
+                                    m.role == Role::Tool
+                                        && m.tool_call_id.as_deref() == Some(&tool_call.id)
+                                });
+                                if already_resolved {
+                                    // Skip — a CANCELLED placeholder was already inserted
+                                } else {
+                                    let content_parts: Vec<String> = result
+                                        .content
+                                        .iter()
+                                        .map(|c| match c.raw.as_text() {
+                                            Some(text) => text.text.clone(),
+                                            None => String::new(),
+                                        })
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
 
-                            messages
-                                .push(tool_result(tool_call.clone().id, result_content.clone()));
+                                    let status = result.get_status();
+                                    let result_content = if status == ToolCallResultStatus::Error
+                                        && content_parts.len() >= 2
+                                    {
+                                        // For error cases, preserve the original formatting
+                                        let error_message = content_parts[1..].join(": ");
+                                        format!("[{}] {}", content_parts[0], error_message)
+                                    } else {
+                                        content_parts.join("\n")
+                                    };
 
-                            send_input_event(
-                                &input_tx,
-                                InputEvent::ToolResult(
-                                    stakpak_shared::models::integrations::openai::ToolCallResult {
-                                        call: tool_call.clone(),
-                                        result: result_content,
-                                        status: result.get_status(),
-                                    },
-                                ),
-                            )
-                            .await?;
+                                    messages.push(tool_result(
+                                        tool_call.clone().id,
+                                        result_content.clone(),
+                                    ));
+
+                                    send_input_event(
+                                        &input_tx,
+                                        InputEvent::ToolResult(
+                                            stakpak_shared::models::integrations::openai::ToolCallResult {
+                                                call: tool_call.clone(),
+                                                result: result_content,
+                                                status,
+                                            },
+                                        ),
+                                    )
+                                    .await?;
+                                }
+                            }
                             send_input_event(
                                 &input_tx,
                                 InputEvent::EndLoadingOperation(LoadingOperation::ToolExecution),
                             )
                             .await?;
 
-                            // Continue to next tool or main loop if error
-                            should_stop = match result.get_status() {
-                                ToolCallResultStatus::Cancelled => true,
-                                ToolCallResultStatus::Error => false,
-                                ToolCallResultStatus::Success => false,
-                            };
+                            should_stop = is_cancelled;
                         }
+                        end_tool_execution_loading_if_none(has_result, &input_tx).await?;
 
                         // Process next tool in queue if available
                         if !tools_queue.is_empty() {
@@ -547,9 +704,15 @@ pub async fn run_interactive(
                             )
                             .await
                             {
-                                Ok((chat_messages, tool_calls, session_id_uuid)) => {
+                                Ok((
+                                    chat_messages,
+                                    tool_calls,
+                                    session_id_uuid,
+                                    checkpoint_metadata,
+                                )) => {
                                     // Track the current session ID
                                     current_session_id = Some(session_id_uuid);
+                                    current_metadata = checkpoint_metadata;
 
                                     // Mark that we need to update rulebooks on the next user message
                                     should_update_rulebooks_on_next_message = true;
@@ -616,9 +779,15 @@ pub async fn run_interactive(
                         )
                         .await
                         {
-                            Ok((chat_messages, tool_calls, session_id_uuid)) => {
+                            Ok((
+                                chat_messages,
+                                tool_calls,
+                                session_id_uuid,
+                                checkpoint_metadata,
+                            )) => {
                                 // Track the current session ID
                                 current_session_id = Some(session_id_uuid);
+                                current_metadata = checkpoint_metadata;
 
                                 // Mark that we need to update rulebooks on the next user message
                                 should_update_rulebooks_on_next_message = true;
@@ -814,7 +983,26 @@ pub async fn run_interactive(
                         .await?;
                         continue;
                     }
+                    OutputEvent::RequestAvailableModels => {
+                        // Load available models from the provider registry
+                        let available_models = client.list_models().await;
+                        send_input_event(
+                            &input_tx,
+                            InputEvent::AvailableModelsLoaded(available_models),
+                        )
+                        .await?;
+                        continue;
+                    }
                 }
+
+                // Skip sending to API if there are pending tool calls without tool_results
+                // This prevents Anthropic API 400 errors about orphaned tool_use blocks
+                if has_pending_tool_calls(&messages, &tools_queue) {
+                    continue;
+                }
+
+                // Start loading before we begin the LLM request/stream handshake
+                start_stream_processing_loading(&input_tx).await?;
 
                 let headers = if study_mode {
                     let mut headers = HeaderMap::new();
@@ -831,6 +1019,8 @@ pub async fn run_interactive(
                             messages.clone(),
                             Some(tools.clone()),
                             headers.clone(),
+                            current_session_id,
+                            current_metadata.clone(),
                         )
                         .await;
 
@@ -933,6 +1123,26 @@ pub async fn run_interactive(
                     Ok(response) => {
                         messages.push(response.choices[0].message.clone());
 
+                        if let Some(session_id) = response
+                            .metadata
+                            .as_ref()
+                            .and_then(|meta| meta.get("session_id"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                        {
+                            current_session_id = Some(session_id);
+                        }
+
+                        // Update metadata from checkpoint state so the next
+                        // turn sees the latest trimming state.
+                        if let Some(state_metadata) = response
+                            .metadata
+                            .as_ref()
+                            .and_then(|meta| meta.get("state_metadata"))
+                        {
+                            current_metadata = Some(state_metadata.clone());
+                        }
+
                         // Accumulate usage from response
                         total_session_usage.prompt_tokens += response.usage.prompt_tokens;
                         total_session_usage.completion_tokens += response.usage.completion_tokens;
@@ -991,10 +1201,9 @@ pub async fn run_interactive(
                             && let Some(checkpoint_id) =
                                 extract_checkpoint_id_from_messages(&messages)
                             && let Ok(checkpoint_uuid) = Uuid::parse_str(&checkpoint_id)
-                            && let Ok(checkpoint_with_session) =
-                                client.get_agent_checkpoint(checkpoint_uuid).await
+                            && let Ok(checkpoint) = client.get_checkpoint(checkpoint_uuid).await
                         {
-                            current_session_id = Some(checkpoint_with_session.session.id);
+                            current_session_id = Some(checkpoint.session_id);
                         }
 
                         // Send tool calls to TUI if present
@@ -1140,7 +1349,7 @@ pub async fn run_interactive(
 
         // Display session stats
         if let Some(session_id) = final_session_id {
-            match client.get_agent_session_stats(session_id).await {
+            match client.get_session_stats(session_id).await {
                 Ok(stats) => {
                     let renderer = OutputRenderer::new(OutputFormat::Text, false);
                     print!("{}", renderer.render_session_stats(&stats));
@@ -1162,18 +1371,17 @@ pub async fn run_interactive(
             .await
             .map(|account| account.username)?;
 
-        let latest_checkpoint = final_messages
-            .iter()
-            .rev()
-            .find(|m| m.role == stakpak_shared::models::integrations::openai::Role::Assistant)
-            .and_then(|m| m.content.as_ref().and_then(|c| c.extract_checkpoint_id()));
+        let resume_command = build_resume_command(
+            final_session_id,
+            extract_last_checkpoint_id(&final_messages),
+        );
 
-        if let Some(latest_checkpoint) = latest_checkpoint {
+        if let Some(resume_command) = resume_command {
             println!(
                 r#"To resume, run:
-stakpak -c {}
+{}
 "#,
-                latest_checkpoint
+                resume_command
             );
         }
 
@@ -1195,4 +1403,254 @@ https://stakpak.dev/{}/agent-sessions/{}",
     } // End of 'profile_switch_loop
 
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn start_stream_processing_emits_loading_start() {
+        let (tx, mut rx) = mpsc::channel(1);
+        start_stream_processing_loading(&tx).await.unwrap();
+
+        match rx.recv().await {
+            Some(InputEvent::StartLoadingOperation(LoadingOperation::StreamProcessing)) => {}
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn end_tool_execution_loading_if_none_emits_end() {
+        let (tx, mut rx) = mpsc::channel(1);
+        end_tool_execution_loading_if_none(false, &tx)
+            .await
+            .unwrap();
+
+        match rx.recv().await {
+            Some(InputEvent::EndLoadingOperation(LoadingOperation::ToolExecution)) => {}
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn end_tool_execution_loading_if_none_skips_when_result_present() {
+        let (tx, mut rx) = mpsc::channel(1);
+        end_tool_execution_loading_if_none(true, &tx).await.unwrap();
+
+        let recv = timeout(Duration::from_millis(50), rx.recv()).await;
+        match recv {
+            Err(_) => {} // timeout == no event, expected
+            Ok(other) => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    fn test_tool_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            r#type: "function".to_string(),
+            function: stakpak_shared::models::integrations::openai::FunctionCall {
+                name: format!("{}_fn", id),
+                arguments: "{}".to_string(),
+            },
+            metadata: None,
+        }
+    }
+
+    fn assistant_with_tool_calls(ids: &[&str]) -> ChatMessage {
+        ChatMessage {
+            role: Role::Assistant,
+            content: Some(MessageContent::String("assistant".to_string())),
+            tool_calls: Some(ids.iter().map(|id| test_tool_call(id)).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn tool_message(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::Tool,
+            content: Some(MessageContent::String(content.to_string())),
+            tool_call_id: Some(id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn get_unresolved_tool_call_ids_returns_empty_when_no_messages() {
+        let messages: Vec<ChatMessage> = vec![];
+        assert!(get_unresolved_tool_call_ids(&messages).is_empty());
+    }
+
+    #[test]
+    fn get_unresolved_tool_call_ids_returns_empty_when_no_assistant_message() {
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::String("hello".to_string())),
+            ..Default::default()
+        }];
+        assert!(get_unresolved_tool_call_ids(&messages).is_empty());
+    }
+
+    #[test]
+    fn get_unresolved_tool_call_ids_returns_ids_for_unresolved_calls() {
+        let messages = vec![assistant_with_tool_calls(&["tool_1"])];
+
+        let unresolved = get_unresolved_tool_call_ids(&messages);
+        assert_eq!(unresolved, vec!["tool_1".to_string()]);
+    }
+
+    #[test]
+    fn get_unresolved_tool_call_ids_returns_empty_when_all_resolved() {
+        let messages = vec![
+            assistant_with_tool_calls(&["tool_1"]),
+            tool_message("tool_1", "result"),
+        ];
+
+        assert!(get_unresolved_tool_call_ids(&messages).is_empty());
+    }
+
+    #[test]
+    fn get_unresolved_tool_call_ids_returns_only_unresolved() {
+        let messages = vec![
+            assistant_with_tool_calls(&["tool_1", "tool_2"]),
+            tool_message("tool_1", "result"),
+        ];
+
+        let unresolved = get_unresolved_tool_call_ids(&messages);
+        assert_eq!(unresolved, vec!["tool_2".to_string()]);
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_true_when_queue_not_empty() {
+        let messages: Vec<ChatMessage> = vec![];
+        let tools_queue = vec![test_tool_call("tool_1")];
+
+        assert!(has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_false_when_empty_queue_and_no_messages() {
+        let messages: Vec<ChatMessage> = vec![];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(!has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_true_when_assistant_has_unresolved_tool_calls() {
+        let messages = vec![assistant_with_tool_calls(&["tool_1"])];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_false_when_all_tool_calls_have_results() {
+        let messages = vec![
+            assistant_with_tool_calls(&["tool_1"]),
+            tool_message("tool_1", "result"),
+        ];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(!has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_true_when_some_tool_calls_missing_results() {
+        let messages = vec![
+            assistant_with_tool_calls(&["tool_1", "tool_2"]),
+            tool_message("tool_1", "result"),
+        ];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_false_when_assistant_has_empty_tool_calls() {
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: Some(MessageContent::String("test".to_string())),
+            tool_calls: Some(vec![]),
+            ..Default::default()
+        }];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(!has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_returns_false_when_assistant_has_no_tool_calls() {
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: Some(MessageContent::String("test".to_string())),
+            tool_calls: None,
+            ..Default::default()
+        }];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        assert!(!has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn has_pending_tool_calls_checks_last_assistant_message_only() {
+        let messages = vec![
+            assistant_with_tool_calls(&["tool_old"]),
+            tool_message("tool_old", "old result"),
+            ChatMessage {
+                role: Role::User,
+                content: Some(MessageContent::String("continue".to_string())),
+                ..Default::default()
+            },
+            assistant_with_tool_calls(&["tool_new"]),
+            tool_message("tool_new", "new result"),
+        ];
+        let tools_queue: Vec<ToolCall> = vec![];
+
+        // Should return false because the LAST assistant message's tool calls are resolved
+        assert!(!has_pending_tool_calls(&messages, &tools_queue));
+    }
+
+    #[test]
+    fn extract_last_checkpoint_id_picks_newest_assistant() {
+        let older = Uuid::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);
+        let newer = Uuid::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: Some(MessageContent::String(format!(
+                    "<checkpoint_id>{}</checkpoint_id>",
+                    older
+                ))),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: Some(MessageContent::String("tool output".to_string())),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: Some(MessageContent::String(format!(
+                    "<checkpoint_id>{}</checkpoint_id>",
+                    newer
+                ))),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(extract_last_checkpoint_id(&messages), Some(newer));
+    }
+
+    #[test]
+    fn extract_last_checkpoint_id_returns_none_without_tag() {
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: Some(MessageContent::String("no checkpoint".to_string())),
+            ..Default::default()
+        }];
+
+        assert_eq!(extract_last_checkpoint_id(&messages), None);
+    }
 }

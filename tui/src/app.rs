@@ -2,7 +2,8 @@ mod events;
 mod types;
 
 pub use events::{InputEvent, OutputEvent};
-use stakpak_shared::models::llm::{LLMModel, LLMTokenUsage};
+use stakai::Model;
+use stakpak_shared::models::llm::LLMTokenUsage;
 pub use types::*;
 
 use crate::services::approval_bar::ApprovalBar;
@@ -25,9 +26,9 @@ use crate::services::toast::Toast;
 use ratatui::layout::Size;
 use ratatui::text::Line;
 use stakpak_api::models::ListRuleBook;
-use stakpak_shared::models::integrations::openai::{AgentModel, ToolCall, ToolCallResult};
+use stakpak_shared::models::integrations::openai::{ToolCall, ToolCallResult};
 use stakpak_shared::secret_manager::SecretManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -123,6 +124,8 @@ pub struct AppState {
     pub completed_tool_calls: std::collections::HashSet<Uuid>,
     pub is_streaming: bool,
     pub latest_tool_call: Option<ToolCall>,
+    /// Stable message ID for the tool call streaming preview block
+    pub tool_call_stream_preview_id: Option<Uuid>,
     pub retry_attempts: usize,
     pub max_retry_attempts: usize,
     pub last_user_message_for_retry: Option<String>,
@@ -168,6 +171,12 @@ pub struct AppState {
     pub filtered_rulebooks: Vec<ListRuleBook>,
     pub rulebook_config: Option<crate::RulebookConfig>,
 
+    // ========== Model Switcher State ==========
+    pub show_model_switcher: bool,
+    pub available_models: Vec<Model>,
+    pub model_switcher_selected: usize,
+    pub current_model: Option<Model>,
+
     // ========== Command Palette State ==========
     pub show_command_palette: bool,
     pub command_palette_selected: usize,
@@ -196,10 +205,11 @@ pub struct AppState {
     pub is_git_repo: bool,
     pub auto_approve_manager: AutoApproveManager,
     pub allowed_tools: Option<Vec<String>>,
-    pub agent_model: AgentModel,
-    pub llm_model: Option<LLMModel>,
+    pub model: Model,
     /// Auth display info: (config_provider, auth_provider, subscription_name) for local providers
     pub auth_display_info: (Option<String>, Option<String>, Option<String>),
+    /// Content of init prompt (init.v2.md) for /init
+    pub init_prompt_content: Option<String>,
 
     // ========== Misc State ==========
     pub ctrl_c_pressed_once: bool,
@@ -259,6 +269,13 @@ pub struct AppState {
 
     /// Billing info for the side panel
     pub billing_info: Option<stakpak_shared::models::billing::BillingResponse>,
+
+    /// Cached pause info for subagent tasks (task_id -> pause_info)
+    /// Used to display what subagents want to do in the approval bar
+    pub subagent_pause_info:
+        HashMap<String, stakpak_shared::models::integrations::openai::TaskPauseInfo>,
+    /// Buffered user messages waiting to be sent after streaming completes
+    pub pending_user_messages: VecDeque<PendingUserMessage>,
 }
 
 pub struct AppStateOptions<'a> {
@@ -269,12 +286,14 @@ pub struct AppStateOptions<'a> {
     pub auto_approve_tools: Option<&'a Vec<String>>,
     pub allowed_tools: Option<&'a Vec<String>>,
     pub input_tx: Option<mpsc::Sender<InputEvent>>,
-    pub agent_model: AgentModel,
+    pub model: Model,
     pub editor_command: Option<String>,
     /// Auth display info: (config_provider, auth_provider, subscription_name) for local providers
     pub auth_display_info: (Option<String>, Option<String>, Option<String>),
     /// Agent board ID for task tracking (from AGENT_BOARD_AGENT_ID env var)
     pub board_agent_id: Option<String>,
+    /// Content of init prompt (init.v2.md, embedded from CLI)
+    pub init_prompt_content: Option<String>,
 }
 
 impl AppState {
@@ -313,10 +332,11 @@ impl AppState {
             auto_approve_tools,
             allowed_tools,
             input_tx,
-            agent_model,
+            model,
             editor_command,
             auth_display_info,
             board_agent_id,
+            init_prompt_content,
         } = options;
 
         let helpers = Self::get_helper_commands();
@@ -395,6 +415,7 @@ impl AppState {
             allowed_tools: allowed_tools.cloned(),
             dialog_focused: false, // Default to messages view focused
             latest_tool_call: None,
+            tool_call_stream_preview_id: None,
             retry_attempts: 0,
             max_retry_attempts: 3,
             last_user_message_for_retry: None,
@@ -470,6 +491,12 @@ impl AppState {
             rulebook_switcher_selected: 0,
             rulebook_search_input: String::new(),
             filtered_rulebooks: Vec::new(),
+
+            // Model switcher initialization
+            show_model_switcher: false,
+            available_models: Vec::new(),
+            model_switcher_selected: 0,
+            current_model: None,
             // Command palette initialization
             show_command_palette: false,
             command_palette_selected: 0,
@@ -496,8 +523,7 @@ impl AppState {
                 prompt_tokens_details: None,
             },
             context_usage_percent: 0,
-            agent_model,
-            llm_model: None,
+            model,
 
             // Side panel initialization
             show_side_panel: false,
@@ -521,8 +547,11 @@ impl AppState {
             editor_command: crate::services::editor::detect_editor(editor_command)
                 .unwrap_or_else(|| "nano".to_string()),
             pending_editor_open: None,
+            pending_user_messages: VecDeque::new(),
             billing_info: None,
             auth_display_info,
+            subagent_pause_info: HashMap::new(),
+            init_prompt_content,
         }
     }
 

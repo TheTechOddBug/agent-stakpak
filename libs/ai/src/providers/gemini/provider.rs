@@ -5,7 +5,8 @@ use super::stream::create_stream;
 use super::types::{GeminiConfig, GeminiResponse};
 use crate::error::{Error, Result};
 use crate::provider::Provider;
-use crate::types::{GenerateRequest, GenerateResponse, GenerateStream, Headers};
+use crate::providers::tls::create_platform_tls_client;
+use crate::types::{GenerateRequest, GenerateResponse, GenerateStream, Headers, Model};
 use async_trait::async_trait;
 use reqwest::Client;
 
@@ -25,7 +26,7 @@ impl GeminiProvider {
             return Err(Error::MissingApiKey("gemini".to_string()));
         }
 
-        let client = Client::new();
+        let client = create_platform_tls_client()?;
         Ok(Self { config, client })
     }
 
@@ -44,10 +45,17 @@ impl GeminiProvider {
         } else {
             "generateContent"
         };
-        format!(
-            "{}models/{}:{}?key={}",
-            self.config.base_url, model, action, self.config.api_key
-        )
+        if stream {
+            format!(
+                "{}models/{}:{}?alt=sse&key={}",
+                self.config.base_url, model, action, self.config.api_key
+            )
+        } else {
+            format!(
+                "{}models/{}:{}?key={}",
+                self.config.base_url, model, action, self.config.api_key
+            )
+        }
     }
 }
 
@@ -73,7 +81,7 @@ impl Provider for GeminiProvider {
     }
 
     async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
-        let url = self.get_url(&request.model, false);
+        let url = self.get_url(&request.model.id, false);
         let gemini_req = to_gemini_request(&request)?;
 
         let headers = self.build_headers(request.options.headers.as_ref());
@@ -104,7 +112,7 @@ impl Provider for GeminiProvider {
     }
 
     async fn stream(&self, request: GenerateRequest) -> Result<GenerateStream> {
-        let url = self.get_url(&request.model, true);
+        let url = self.get_url(&request.model.id, true);
         let gemini_req = to_gemini_request(&request)?;
 
         let headers = self.build_headers(request.options.headers.as_ref());
@@ -129,13 +137,13 @@ impl Provider for GeminiProvider {
         create_stream(response).await
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
-        // Gemini has a models endpoint, but for simplicity return known models
-        Ok(vec![
-            "gemini-2.0-flash-exp".to_string(),
-            "gemini-1.5-pro".to_string(),
-            "gemini-1.5-flash".to_string(),
-            "gemini-1.0-pro".to_string(),
-        ])
+    async fn list_models(&self) -> Result<Vec<Model>> {
+        // Load from models.dev cache (uses "google" as provider ID)
+        crate::registry::models_dev::load_models_for_provider("google")
+    }
+
+    async fn get_model(&self, id: &str) -> Result<Option<Model>> {
+        let models = crate::registry::models_dev::load_models_for_provider("google")?;
+        Ok(models.into_iter().find(|m| m.id == id))
     }
 }
