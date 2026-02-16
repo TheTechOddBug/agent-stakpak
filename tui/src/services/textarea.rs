@@ -375,11 +375,7 @@ impl TextArea {
     }
 
     pub fn get_prefix(&self) -> &'static str {
-        if self.shell_mode {
-            "$ "
-        } else {
-            "→ "
-        }
+        if self.shell_mode { "$ " } else { "→ " }
     }
 
     pub fn get_prefix_width(&self) -> usize {
@@ -420,11 +416,7 @@ impl TextArea {
         // partition_point returns the index of the first element for which
         // the predicate is false, i.e. the count of elements with start <= pos.
         let idx = lines.partition_point(|r| r.start <= pos);
-        if idx == 0 {
-            None
-        } else {
-            Some(idx - 1)
-        }
+        if idx == 0 { None } else { Some(idx - 1) }
     }
 
     fn move_to_display_col_on_line(
@@ -1670,7 +1662,7 @@ mod tests {
     fn word_navigation_helpers() {
         let t = ta_with("  alpha  beta   gamma");
         let mut t = t; // make mutable for set_cursor
-                       // Put cursor after "alpha"
+        // Put cursor after "alpha"
         let after_alpha = t.text().find("alpha").unwrap() + "alpha".len();
         t.set_cursor(after_alpha);
         assert_eq!(t.beginning_of_previous_word(), 2); // skip initial spaces
@@ -1763,7 +1755,7 @@ mod tests {
     fn wrapped_navigation_across_visual_lines() {
         let mut t = ta_with("abcdefghij");
         let prefix_width = t.get_prefix_width() as u16; // 2
-                                                        // Force wrapping at content width 4: lines -> ["abcd", "efgh", "ij"]
+        // Force wrapping at content width 4: lines -> ["abcd", "efgh", "ij"]
         let content_wrap = 4u16;
         let _ = t.desired_height(content_wrap);
 
@@ -1804,7 +1796,7 @@ mod tests {
     fn cursor_pos_with_state_after_movements() {
         let mut t = ta_with("abcdefghij");
         let prefix_width = t.get_prefix_width() as u16; // 2
-                                                        // Content wraps at 4 -> visual lines: abcd | efgh | ij
+        // Content wraps at 4 -> visual lines: abcd | efgh | ij
         let content_wrap = 4u16;
         let _ = t.desired_height(content_wrap);
         let area = Rect::new(0, 0, prefix_width + content_wrap, 2);
