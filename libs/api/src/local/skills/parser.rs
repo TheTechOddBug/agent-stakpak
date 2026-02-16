@@ -106,14 +106,22 @@ pub fn parse_skill_md(content: &str) -> Result<(SkillFrontmatter, String), Strin
     }
 
     // Find the closing ---
-    let after_first = &trimmed[3..];
+    // SAFETY: trimmed starts with "---" (3 ASCII bytes), so index 3 is always a valid char boundary.
+    let after_first = trimmed
+        .get(3..)
+        .ok_or_else(|| "SKILL.md frontmatter unexpectedly short".to_string())?;
     let end_idx = after_first
         .find("\n---")
         .ok_or_else(|| "SKILL.md frontmatter missing closing ---".to_string())?;
 
-    let yaml_str = &after_first[..end_idx];
+    // end_idx comes from .find() on after_first, so it's a valid char boundary.
+    let yaml_str = after_first
+        .get(..end_idx)
+        .ok_or_else(|| "SKILL.md frontmatter invalid boundary".to_string())?;
     let body_start = end_idx + 4; // skip "\n---"
-    let body = after_first[body_start..]
+    let body = after_first
+        .get(body_start..)
+        .unwrap_or("")
         .trim_start_matches('\n')
         .to_string();
 
