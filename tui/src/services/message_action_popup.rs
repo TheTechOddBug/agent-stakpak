@@ -1,7 +1,7 @@
 //! Message Action Popup
 //!
 //! A popup that appears when left-clicking on a user message.
-//! Provides actions like copying the message text or reverting to that point.
+//! Provides actions like copying the message text.
 
 use ratatui::{
     Frame,
@@ -18,12 +18,11 @@ use crate::app::AppState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageAction {
     CopyMessage,
-    RevertToMessage,
 }
 
 impl MessageAction {
     pub fn all() -> Vec<Self> {
-        vec![Self::CopyMessage, Self::RevertToMessage]
+        vec![Self::CopyMessage]
     }
 }
 
@@ -33,9 +32,9 @@ pub fn render_message_action_popup(f: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Calculate popup size - centered, max width 50, height for 2 items + title + padding
+    // Calculate popup size - centered, max width 50, height for 1 item + title + padding
     let popup_width: u16 = 50;
-    let popup_height: u16 = 7; // Title + 2 items + borders + padding
+    let popup_height: u16 = 6; // Title + 1 item + borders + padding
 
     let terminal_area = f.area();
     let x = (terminal_area.width.saturating_sub(popup_width)) / 2;
@@ -88,7 +87,6 @@ pub fn render_message_action_popup(f: &mut Frame, state: &AppState) {
 
         let (highlight_word, rest_text) = match action {
             MessageAction::CopyMessage => ("Copy", " message text to clipboard"),
-            MessageAction::RevertToMessage => ("Revert", " undo messages and file changes"),
         };
 
         // Full width background for selected item
