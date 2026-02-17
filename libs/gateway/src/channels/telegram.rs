@@ -290,10 +290,7 @@ impl Channel for TelegramChannel {
 
         let chunks = chunk_text(&reply.text, TELEGRAM_TEXT_LIMIT);
         for chunk in chunks {
-            if let Err(error) = self.send_chunk(chat_id, thread_id, &chunk).await {
-                warn!(error = %error, "telegram send chunk failed");
-                return Err(error);
-            }
+            self.send_chunk(chat_id, thread_id, &chunk).await?;
         }
 
         Ok(())
