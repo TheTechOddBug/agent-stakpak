@@ -89,13 +89,12 @@ impl DiscordChannel {
             .context("discord gateway/bot decode failed")?;
 
         let mut url = payload.url;
-        // Ensure a path separator exists before appending query params;
-        // Discord returns "wss://gateway.discord.gg" without a trailing slash
-        // and Cloudflare rejects URLs with no path component.
-        if !url.ends_with('/') && !url.contains('?') {
-            url.push('/');
-        }
         if !url.contains('?') {
+            // Discord returns "wss://gateway.discord.gg" without a trailing slash
+            // and Cloudflare rejects URLs with no path component.
+            if !url.ends_with('/') {
+                url.push('/');
+            }
             url.push_str("?v=10&encoding=json");
         } else {
             if !url.contains("v=") {
