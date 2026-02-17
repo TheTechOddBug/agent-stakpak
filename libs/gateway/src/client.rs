@@ -69,6 +69,7 @@ pub struct SendMessageOptions {
     pub model: Option<String>,
     pub message_type: MessageType,
     pub run_id: Option<Uuid>,
+    pub sandbox: Option<bool>,
 }
 
 impl Default for SendMessageOptions {
@@ -77,6 +78,7 @@ impl Default for SendMessageOptions {
             model: None,
             message_type: MessageType::Message,
             run_id: None,
+            sandbox: None,
         }
     }
 }
@@ -249,6 +251,7 @@ impl StakpakClient {
             "type": opts.message_type,
             "run_id": opts.run_id,
             "model": opts.model,
+            "sandbox": opts.sandbox,
         });
 
         self.request_json(

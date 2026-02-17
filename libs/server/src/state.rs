@@ -1,6 +1,6 @@
 use crate::{
     checkpoint_store::CheckpointStore, event_log::EventLog, idempotency::IdempotencyStore,
-    session_manager::SessionManager,
+    sandbox::SandboxConfig, session_manager::SessionManager,
 };
 use stakpak_agent_core::{ProposedToolCall, ToolApprovalPolicy};
 use stakpak_api::SessionStorage;
@@ -33,6 +33,7 @@ pub struct AppState {
     pub mcp_tools: Arc<RwLock<Vec<stakai::Tool>>>,
     pub mcp_server_shutdown_tx: Option<broadcast::Sender<()>>,
     pub mcp_proxy_shutdown_tx: Option<broadcast::Sender<()>>,
+    pub sandbox_config: Option<SandboxConfig>,
     pending_tools: Arc<RwLock<HashMap<Uuid, PendingToolApprovals>>>,
 }
 
@@ -62,6 +63,7 @@ impl AppState {
             mcp_tools: Arc::new(RwLock::new(Vec::new())),
             mcp_server_shutdown_tx: None,
             mcp_proxy_shutdown_tx: None,
+            sandbox_config: None,
             pending_tools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -77,6 +79,11 @@ impl AppState {
         self.mcp_tools = Arc::new(RwLock::new(mcp_tools));
         self.mcp_server_shutdown_tx = mcp_server_shutdown_tx;
         self.mcp_proxy_shutdown_tx = mcp_proxy_shutdown_tx;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox_config: SandboxConfig) -> Self {
+        self.sandbox_config = Some(sandbox_config);
         self
     }
 

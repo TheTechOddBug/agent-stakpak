@@ -124,6 +124,10 @@ pub struct ScheduleDefaults {
     #[serde(default = "default_pause_on_approval")]
     pub pause_on_approval: bool,
 
+    /// Run agent tool calls inside a sandboxed warden container.
+    #[serde(default)]
+    pub sandbox: bool,
+
     /// Determines which check script exit codes trigger the agent.
     /// - "success" (default): trigger on exit 0
     /// - "failure": trigger on non-zero exit codes (1+)
@@ -141,6 +145,7 @@ impl Default for ScheduleDefaults {
             enable_slack_tools: false,
             enable_subagents: false,
             pause_on_approval: default_pause_on_approval(),
+            sandbox: false,
             trigger_on: CheckTriggerOn::default(),
         }
     }
@@ -270,6 +275,10 @@ pub struct Schedule {
     /// Falls back to defaults.pause_on_approval if not specified.
     pub pause_on_approval: Option<bool>,
 
+    /// Run agent tool calls inside a sandboxed warden container.
+    /// Falls back to defaults.sandbox if not specified.
+    pub sandbox: Option<bool>,
+
     /// Notification mode override for this schedule.
     pub notify_on: Option<NotifyOn>,
 
@@ -319,6 +328,11 @@ impl Schedule {
     /// Get the effective pause_on_approval, falling back to defaults.
     pub fn effective_pause_on_approval(&self, defaults: &ScheduleDefaults) -> bool {
         self.pause_on_approval.unwrap_or(defaults.pause_on_approval)
+    }
+
+    /// Get the effective sandbox, falling back to defaults.
+    pub fn effective_sandbox(&self, defaults: &ScheduleDefaults) -> bool {
+        self.sandbox.unwrap_or(defaults.sandbox)
     }
 
     /// Resolve notification delivery target using schedule overrides and global defaults.

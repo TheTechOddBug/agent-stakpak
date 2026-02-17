@@ -6,6 +6,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
+/// The container image used for sandboxed agent sessions.
+pub fn stakpak_agent_image() -> String {
+    format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Subcommand, PartialEq)]
 pub enum WardenCommands {
     /// Run any container image through Warden's network firewall (sidecar pattern)
@@ -138,7 +143,7 @@ impl WardenCommands {
     }
 }
 
-async fn get_warden_plugin_path() -> String {
+pub async fn get_warden_plugin_path() -> String {
     let warden_config = PluginConfig {
         name: "warden".to_string(),
         base_url: "https://warden-cli-releases.s3.amazonaws.com/".to_string(),
@@ -157,7 +162,7 @@ async fn get_warden_plugin_path() -> String {
 /// Helper function to prepare volumes for warden container
 /// Collects volumes from config and always appends stakpak config if it exists and isn't already mounted
 /// If check_enabled is true, only adds volumes when warden is enabled in config
-fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
+pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
     let mut volumes_to_mount = Vec::new();
 
     // Add volumes from profile config
@@ -325,7 +330,7 @@ pub async fn run_default_warden(
     cmd.arg("wrap");
 
     // Use standard stakpak image with current CLI version (no special warden image needed)
-    let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+    let stakpak_image = stakpak_agent_image();
     cmd.arg(&stakpak_image);
 
     // Enable TTY by default for convenience command
@@ -364,7 +369,7 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
     cmd.arg("wrap");
 
     // Use standard stakpak image with current CLI version (no special warden image needed)
-    let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+    let stakpak_image = stakpak_agent_image();
     cmd.arg(&stakpak_image);
 
     // Determine if we need TTY (interactive mode) based on CLI args.

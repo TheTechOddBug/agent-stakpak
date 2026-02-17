@@ -1,4 +1,9 @@
-use crate::{message_bridge, state::AppState, types::SessionHandle};
+use crate::{
+    message_bridge,
+    sandbox::{SandboxConfig, SandboxedMcpServer},
+    state::AppState,
+    types::SessionHandle,
+};
 use async_trait::async_trait;
 use rmcp::model::{
     CallToolRequestParam, CancelledNotification, CancelledNotificationMethod,
@@ -12,6 +17,7 @@ use stakpak_agent_core::{
     ToolExecutionResult, ToolExecutor, run_agent,
 };
 use stakpak_api::CreateCheckpointRequest;
+use stakpak_mcp_client::McpClient;
 use stakpak_shared::utils::sanitize_text_output;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -40,6 +46,7 @@ pub fn spawn_session_actor(
     run_id: Uuid,
     model: stakai::Model,
     user_message: Message,
+    sandbox_config: Option<SandboxConfig>,
 ) -> Result<SessionHandle, String> {
     let (command_tx, command_rx) = mpsc::channel(128);
     let cancel = CancellationToken::new();
@@ -56,6 +63,7 @@ pub fn spawn_session_actor(
             user_message,
             command_rx,
             cancel,
+            sandbox_config,
         )
         .await;
 
@@ -69,6 +77,7 @@ pub fn spawn_session_actor(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_actor(
     state: AppState,
     session_id: Uuid,
@@ -77,6 +86,7 @@ async fn run_session_actor(
     user_message: Message,
     command_rx: mpsc::Receiver<AgentCommand>,
     cancel: CancellationToken,
+    sandbox_config: Option<SandboxConfig>,
 ) -> Result<(), String> {
     let active_checkpoint = state
         .session_store
@@ -138,7 +148,35 @@ async fn run_session_actor(
         }
     });
 
-    let run_tools = state.current_mcp_tools().await;
+    // If sandbox is requested, spawn a sandboxed MCP server for this session.
+    // Otherwise, use the shared in-process MCP client.
+    let sandbox = if let Some(sandbox_config) = sandbox_config {
+        tracing::info!(session_id = %session_id, image = %sandbox_config.image, "Spawning sandbox container for session");
+        Some(
+            SandboxedMcpServer::spawn(&sandbox_config)
+                .await
+                .map_err(|e| format!("Failed to start sandbox for session {session_id}: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let (run_tools, tool_executor): (Vec<stakai::Tool>, Box<dyn ToolExecutor + Send + Sync>) =
+        if let Some(ref sandbox) = sandbox {
+            (
+                sandbox.tools.clone(),
+                Box::new(SandboxedToolExecutor {
+                    mcp_client: sandbox.client.clone(),
+                }),
+            )
+        } else {
+            (
+                state.current_mcp_tools().await,
+                Box::new(ServerToolExecutor {
+                    state: state.clone(),
+                }),
+            )
+        };
 
     let agent_config = AgentConfig {
         model,
@@ -151,10 +189,6 @@ async fn run_session_actor(
         retry: RetryConfig::default(),
         compaction: CompactionConfig::default(),
         tools: run_tools,
-    };
-
-    let tool_executor = ServerToolExecutor {
-        state: state.clone(),
     };
 
     let hooks: Vec<Box<dyn AgentHook>> = vec![Box::new(ServerCheckpointHook {
@@ -170,7 +204,7 @@ async fn run_session_actor(
         &agent_config,
         initial_messages,
         user_message,
-        &tool_executor,
+        tool_executor.as_ref(),
         &hooks,
         core_event_tx,
         command_rx,
@@ -181,6 +215,11 @@ async fn run_session_actor(
 
     periodic_checkpoint_cancel.cancel();
     let _ = periodic_task.await;
+
+    // Shut down sandbox container if one was started
+    if let Some(sandbox) = sandbox {
+        sandbox.shutdown().await;
+    }
 
     state.clear_pending_tools(session_id, run_id).await;
 
@@ -236,6 +275,31 @@ impl ToolExecutor for ServerToolExecutor {
         cancel: &CancellationToken,
     ) -> Result<ToolExecutionResult, stakpak_agent_core::AgentError> {
         Ok(execute_mcp_tool_call(&self.state, run.session_id, run.run_id, tool_call, cancel).await)
+    }
+}
+
+/// Tool executor that routes calls through a per-session sandboxed MCP client.
+#[derive(Clone)]
+struct SandboxedToolExecutor {
+    mcp_client: Arc<McpClient>,
+}
+
+#[async_trait]
+impl ToolExecutor for SandboxedToolExecutor {
+    async fn execute_tool_call(
+        &self,
+        run: &AgentRunContext,
+        tool_call: &ProposedToolCall,
+        cancel: &CancellationToken,
+    ) -> Result<ToolExecutionResult, stakpak_agent_core::AgentError> {
+        Ok(execute_mcp_tool_call_with_client(
+            &self.mcp_client,
+            run.session_id,
+            run.run_id,
+            tool_call,
+            cancel,
+        )
+        .await)
     }
 }
 
@@ -386,6 +450,16 @@ async fn execute_mcp_tool_call(
         };
     };
 
+    execute_mcp_tool_call_with_client(mcp_client, session_id, run_id, tool_call, cancel).await
+}
+
+async fn execute_mcp_tool_call_with_client(
+    mcp_client: &McpClient,
+    session_id: Uuid,
+    run_id: Uuid,
+    tool_call: &ProposedToolCall,
+    cancel: &CancellationToken,
+) -> ToolExecutionResult {
     let metadata = Some(serde_json::Map::from_iter([
         (
             "session_id".to_string(),

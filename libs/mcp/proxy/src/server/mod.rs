@@ -358,6 +358,7 @@ impl ProxyServer {
                 url,
                 headers,
                 certificate_chain,
+                client_tls_config,
             } => {
                 // Validate TLS usage
                 if !url.starts_with("https://") {
@@ -379,7 +380,10 @@ impl ProxyServer {
                 // Configure TLS: use mTLS cert chain if provided, otherwise use
                 // platform-verified TLS so the OS CA store is trusted (needed for
                 // warden container where a custom CA is installed).
-                if let Some(cert_chain) = certificate_chain.as_ref() {
+                if let Some(tls_config) = client_tls_config {
+                    client_builder =
+                        client_builder.use_preconfigured_tls(tls_config.as_ref().clone());
+                } else if let Some(cert_chain) = certificate_chain.as_ref() {
                     match cert_chain.create_client_config() {
                         Ok(tls_config) => {
                             client_builder = client_builder.use_preconfigured_tls(tls_config);

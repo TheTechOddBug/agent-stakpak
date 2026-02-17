@@ -143,6 +143,7 @@ async fn start_mcp_server(
             tool_mode: ToolMode::Combined,
             enable_subagents,
             certificate_chain: cert_chain,
+            server_tls_config: None,
         };
 
         // Signal that we're about to start
@@ -180,6 +181,7 @@ fn build_proxy_config(
             url: local_server_url,
             headers: None,
             certificate_chain: server_cert_chain,
+            client_tls_config: None,
         },
     );
 
@@ -190,6 +192,7 @@ fn build_proxy_config(
             url: "https://apiv2.stakpak.dev/v1/paks/mcp".to_string(),
             headers: None,
             certificate_chain: Arc::new(None),
+            client_tls_config: None,
         },
     );
 

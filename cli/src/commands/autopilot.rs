@@ -145,10 +145,9 @@ pub enum AutopilotScheduleCommands {
         #[arg(long, default_value_t = ScheduleTriggerOn::Failure)]
         trigger_on: ScheduleTriggerOn,
 
-        /// Working directory for this schedule
-        #[arg(long)]
-        workdir: Option<String>,
-
+        // /// Working directory for this schedule
+        // #[arg(long)]
+        // workdir: Option<String>,
         /// Max agent steps
         #[arg(long, default_value_t = 50)]
         max_steps: u32,
@@ -160,6 +159,10 @@ pub enum AutopilotScheduleCommands {
         /// Require approval before acting
         #[arg(long, default_value_t = false)]
         pause_on_approval: bool,
+
+        /// Run agent tool calls inside a sandboxed warden container
+        #[arg(long, default_value_t = false)]
+        sandbox: bool,
 
         /// Enable immediately
         #[arg(long, default_value_t = true)]
@@ -351,14 +354,16 @@ struct AutopilotScheduleConfig {
     check: Option<String>,
     #[serde(default)]
     trigger_on: ScheduleTriggerOn,
-    #[serde(default)]
-    workdir: Option<String>,
+    // #[serde(default)]
+    // workdir: Option<String>,
     #[serde(default = "default_schedule_max_steps")]
     max_steps: u32,
     #[serde(default)]
     channel: Option<String>,
     #[serde(default)]
     pause_on_approval: bool,
+    #[serde(default)]
+    sandbox: bool,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -1030,6 +1035,18 @@ async fn start_foreground_runtime(
         Some(mcp_init_result.proxy_shutdown_tx),
     );
 
+    // --- 1b. Sandbox configuration (warden + container image) ---
+    let warden_path = crate::commands::warden::get_warden_plugin_path().await;
+    let stakpak_image = crate::commands::warden::stakpak_agent_image();
+    let volumes = crate::commands::warden::prepare_volumes(config, false);
+    let sandbox_config = stakpak_server::SandboxConfig {
+        warden_path,
+        image: stakpak_image.clone(),
+        volumes,
+    };
+    tracing::info!(image = %stakpak_image, warden = %sandbox_config.warden_path, "Sandbox config initialized");
+    let app_state = app_state.with_sandbox(sandbox_config);
+
     // --- 2. Loopback connection for schedule + gateway runtimes ---
     let loopback_url = loopback_server_url(listener_addr);
     let loopback_token = if options.no_auth {
@@ -1412,10 +1429,11 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
             prompt,
             check,
             trigger_on,
-            workdir,
+            // workdir,
             max_steps,
             channel,
             pause_on_approval,
+            sandbox,
             enabled,
         } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
@@ -1425,10 +1443,11 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
                 prompt,
                 check,
                 trigger_on,
-                workdir,
+                // workdir,
                 max_steps,
                 channel,
                 pause_on_approval,
+                sandbox,
                 enabled,
             };
             add_schedule_in_config(&mut config, schedule)?;
@@ -3104,10 +3123,11 @@ mod tests {
             prompt: "Check infra".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
+            sandbox: false,
             enabled: true,
         }
     }
@@ -3458,10 +3478,11 @@ app_token = "xapp-test"
             prompt: "hello".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
+            sandbox: false,
             enabled: true,
         };
         let result = add_schedule_in_config(&mut config, schedule);

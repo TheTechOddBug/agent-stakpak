@@ -651,6 +651,7 @@ async fn handle_schedule_event(
         enable_slack_tools: schedule.effective_enable_slack_tools(&config.defaults),
         enable_subagents: schedule.effective_enable_subagents(&config.defaults),
         pause_on_approval: schedule.effective_pause_on_approval(&config.defaults),
+        sandbox: schedule.effective_sandbox(&config.defaults),
         server: server.clone(),
     };
 
