@@ -326,7 +326,7 @@ struct GetUpdatesParams {
     allowed_updates: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 struct SendMessageParams {
     chat_id: i64,
     text: String,
