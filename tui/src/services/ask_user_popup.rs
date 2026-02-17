@@ -5,22 +5,22 @@
 //!
 //! Design:
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────────────┐
-//! │ ← □ Visibility   □ Enrollment   ✓ Payment   □ Coach Access   Review →           │
-//! ├─────────────────────────────────────────────────────────────────────────────────┤
-//! │                                                                                 │
-//! │ Should academies be public by default (visible to all users), or should they   │
-//! │ require admin approval before being listed?                                     │
-//! │                                                                                 │
-//! │ [>] Public by default                                                           │
-//! │     Academies are visible immediately after creation                            │
-//! │ [2] Require approval                                                            │
-//! │     Admin must approve before academy appears in listings                       │
-//! │ [3] Other... Type your answer...│                                               │
-//! │                                                                                 │
-//! ├─────────────────────────────────────────────────────────────────────────────────┤
-//! │ Enter to select · ↑/↓ options · ←/→ questions · 1-9 quick select · Esc cancel  │
-//! └─────────────────────────────────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────────────────────────┐
+//! │  ← □ Visibility   □ Enrollment   ✓ Payment   □ Coach Access   Review →          │
+//! ├──────────────────────────────────────────────────────────────────────────────────┤
+//! │                                                                                  │
+//! │  Should academies be public by default (visible to all users), or should they    │
+//! │  require admin approval before being listed?                                     │
+//! │                                                                                  │
+//! │  [>] Public by default                                                           │
+//! │       Academies are visible immediately after creation                            │
+//! │  [2] Require approval                                                            │
+//! │       Admin must approve before academy appears in listings                      │
+//! │  [3] │Type your answer...                                                        │
+//! │                                                                                  │
+//! ├──────────────────────────────────────────────────────────────────────────────────┤
+//! │  Enter select · ↑/↓ options · ←/→ questions · 1-9 quick select · Esc cancel     │
+//! └──────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use crate::app::AppState;
@@ -33,17 +33,23 @@ use ratatui::{
 };
 use stakpak_shared::models::integrations::openai::AskUserQuestion;
 
+/// Horizontal padding inside the content area (left side)
+const CONTENT_PAD: &str = "  ";
+const CONTENT_PAD_LEN: usize = 2;
+/// Indent for option descriptions — aligns under label text after "[n] "
+const DESC_INDENT: &str = "       "; // CONTENT_PAD + "[n] " + " "
+
 /// Calculate the height needed for the ask user popup
 pub fn calculate_ask_user_height(state: &AppState, terminal_width: u16) -> u16 {
     if !state.show_ask_user_popup || state.ask_user_questions.is_empty() {
         return 0;
     }
 
-    // If we're on the Submit tab, calculate based on question count
+    // If we're on the Review tab, calculate based on question count
     if state.ask_user_current_tab >= state.ask_user_questions.len() {
-        // Tab bar (1) + border (1) + empty (1)
+        // Tab bar (1) + border (1) + pad (1)
         // + per question: label (1) + answer (1) + spacing (1) = 3 each
-        // + submit button (1) + help (1) + border (1)
+        // + warning or pad (1) + help (1) + border (1)
         let question_lines = state.ask_user_questions.len() * 3;
         let total = 1 + 1 + 1 + question_lines + 1 + 1 + 1;
         let max_height = (terminal_width as f32 * 0.6) as u16;
@@ -51,10 +57,12 @@ pub fn calculate_ask_user_height(state: &AppState, terminal_width: u16) -> u16 {
     }
 
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
-    let inner_width = terminal_width.saturating_sub(4) as usize; // borders + padding
+    // Available width for text = total - borders(2) - inner margin(2) - content padding(2)
+    let inner_width = terminal_width.saturating_sub(4) as usize;
+    let text_width = inner_width.saturating_sub(CONTENT_PAD_LEN);
 
     // Question text wrapped lines
-    let question_lines = textwrap::wrap(&current_q.question, inner_width).len();
+    let question_lines = textwrap::wrap(&current_q.question, text_width).len();
 
     // Options: each option takes 1 line for label, optionally 1 for description
     let mut option_lines = 0;
@@ -71,12 +79,12 @@ pub fn calculate_ask_user_height(state: &AppState, terminal_width: u16) -> u16 {
     // Height calculation:
     // - Tab bar: 1
     // - Top border: 1
-    // - Empty line: 1
+    // - Pad line: 1
     // - Question text: question_lines
-    // - Empty line: 1
+    // - Pad line: 1
     // - Options: option_lines
     // - Custom input: custom_lines
-    // - Empty line: 1
+    // - Pad line: 1
     // - Help text: 1
     // - Bottom border: 1
     let total = 1 + 1 + 1 + question_lines + 1 + option_lines + custom_lines + 1 + 1 + 1;
@@ -136,12 +144,12 @@ pub fn render_ask_user_popup(f: &mut Frame, state: &AppState) {
     render_help_text(f, state, chunks[2]);
 }
 
-/// Render the tab bar showing all questions and Submit
+/// Render the tab bar showing all questions and Review
 fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let mut spans = vec![];
 
-    // Left arrow
-    spans.push(Span::styled("← ", Style::default().fg(Color::DarkGray)));
+    // Left padding + arrow
+    spans.push(Span::styled(" ← ", Style::default().fg(Color::DarkGray)));
 
     for (i, q) in state.ask_user_questions.iter().enumerate() {
         let is_current = i == state.ask_user_current_tab;
@@ -199,15 +207,19 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
     // Empty line for spacing
     lines.push(Line::from(""));
 
-    // Question text (bold, wrapped)
-    let wrapped_question = textwrap::wrap(&q.question, area.width as usize);
+    // Question text (bold, wrapped — account for padding)
+    let text_width = (area.width as usize).saturating_sub(CONTENT_PAD_LEN);
+    let wrapped_question = textwrap::wrap(&q.question, text_width);
     for line in wrapped_question {
-        lines.push(Line::from(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(vec![
+            Span::raw(CONTENT_PAD),
+            Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
     }
 
     // Empty line
@@ -251,9 +263,9 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Need to own the formatted string for the numbered case
         let bracket_owned = bracket.to_string();
         lines.push(Line::from(vec![
+            Span::raw(CONTENT_PAD),
             Span::styled(bracket_owned, bracket_style),
             Span::raw(" "),
             Span::styled(&opt.label, label_style),
@@ -266,7 +278,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
                 Style::default().fg(Color::DarkGray)
             };
             lines.push(Line::from(Span::styled(
-                format!("    {}", desc),
+                format!("{}{}", DESC_INDENT, desc),
                 desc_style,
             )));
         }
@@ -300,9 +312,10 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
         };
 
         if is_selected {
-            // Active input: bracket + cursor + typed text (or placeholder)
+            // Active input: pad + bracket + cursor + typed text (or placeholder)
             if state.ask_user_custom_input.is_empty() {
                 lines.push(Line::from(vec![
+                    Span::raw(CONTENT_PAD),
                     Span::styled(bracket, bracket_style),
                     Span::raw(" "),
                     Span::styled("│", Style::default().fg(Color::Cyan)),
@@ -310,6 +323,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
                 ]));
             } else {
                 lines.push(Line::from(vec![
+                    Span::raw(CONTENT_PAD),
                     Span::styled(bracket, bracket_style),
                     Span::raw(" "),
                     Span::styled(
@@ -322,15 +336,15 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
                 ]));
             }
         } else if is_custom_answered && let Some(answer) = previous_answer {
-            // Answered custom: bracket + the answer text
             lines.push(Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled(bracket, bracket_style),
                 Span::raw(" "),
                 Span::styled(&answer.answer, Style::default().fg(Color::Cyan)),
             ]));
         } else {
-            // Inactive: bracket + placeholder
             lines.push(Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled(bracket, bracket_style),
                 Span::raw(" "),
                 Span::styled("Other...", Style::default().fg(Color::DarkGray)),
@@ -345,7 +359,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
 fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
     let mut lines = vec![];
     let all_required_answered = check_all_required_answered(state);
-    let inner_width = area.width as usize;
+    let inner_width = (area.width as usize).saturating_sub(CONTENT_PAD_LEN);
 
     lines.push(Line::from(""));
 
@@ -357,6 +371,7 @@ fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
             .add_modifier(Modifier::BOLD);
         let required_marker = if q.required { " *" } else { "" };
         lines.push(Line::from(vec![
+            Span::raw(CONTENT_PAD),
             Span::styled(&q.label, label_style),
             Span::styled(required_marker, Style::default().fg(Color::Red)),
         ]));
@@ -375,7 +390,7 @@ fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
             };
 
             // Truncate to available width (char-safe)
-            let max_display = inner_width.saturating_sub(4); // "  " prefix
+            let max_display = inner_width.saturating_sub(CONTENT_PAD_LEN);
             let display = if display.chars().count() > max_display {
                 format!(
                     "{}…",
@@ -389,16 +404,19 @@ fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
             };
 
             lines.push(Line::from(vec![
-                Span::raw("  "),
+                Span::raw(CONTENT_PAD),
+                Span::raw(CONTENT_PAD),
                 Span::styled(display, Style::default().fg(Color::Cyan)),
             ]));
         } else if q.required {
             lines.push(Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled("  □ ", Style::default().fg(Color::Yellow)),
                 Span::styled("not answered", Style::default().fg(Color::Yellow)),
             ]));
         } else {
             lines.push(Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled("  — ", Style::default().fg(Color::DarkGray)),
                 Span::styled("skipped", Style::default().fg(Color::DarkGray)),
             ]));
@@ -410,10 +428,13 @@ fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
 
     // Show warning if not all required questions are answered
     if !all_required_answered {
-        lines.push(Line::from(Span::styled(
-            "  Answer all required (*) questions to submit",
-            Style::default().fg(Color::Yellow),
-        )));
+        lines.push(Line::from(vec![
+            Span::raw(CONTENT_PAD),
+            Span::styled(
+                "Answer all required (*) questions to submit",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
     }
 
     f.render_widget(Paragraph::new(lines), area);
@@ -426,6 +447,7 @@ fn render_help_text(f: &mut Frame, state: &AppState, area: Rect) {
 
     let help = if is_submit_tab && all_required_answered {
         Line::from(vec![
+            Span::raw(CONTENT_PAD),
             Span::styled("Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" submit", Style::default().fg(Color::Green)),
             Span::raw(" · "),
@@ -437,6 +459,7 @@ fn render_help_text(f: &mut Frame, state: &AppState, area: Rect) {
         ])
     } else if is_submit_tab {
         Line::from(vec![
+            Span::raw(CONTENT_PAD),
             Span::styled("←/→", Style::default().fg(Color::DarkGray)),
             Span::styled(" questions", Style::default().fg(Color::Cyan)),
             Span::raw(" · "),
@@ -451,6 +474,7 @@ fn render_help_text(f: &mut Frame, state: &AppState, area: Rect) {
 
         if is_custom_selected {
             Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled("Type", Style::default().fg(Color::DarkGray)),
                 Span::styled(" your answer", Style::default().fg(Color::Cyan)),
                 Span::raw(" · "),
@@ -465,6 +489,7 @@ fn render_help_text(f: &mut Frame, state: &AppState, area: Rect) {
             ])
         } else {
             Line::from(vec![
+                Span::raw(CONTENT_PAD),
                 Span::styled("Enter", Style::default().fg(Color::DarkGray)),
                 Span::styled(" select", Style::default().fg(Color::Cyan)),
                 Span::raw(" · "),
