@@ -125,6 +125,9 @@ pub struct MCPServerConfig {
     pub tool_mode: ToolMode,
     pub enable_subagents: bool,
     pub certificate_chain: Arc<Option<CertificateChain>>,
+    /// Pre-built rustls ServerConfig for TLS. When set, this is used directly
+    /// instead of building one from `certificate_chain`.
+    pub server_tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 /// Create graceful shutdown handler
@@ -291,10 +294,16 @@ async fn start_server_internal(
 
     let router = axum::Router::new().nest_service("/mcp", service);
 
-    if let Some(cert_chain) = config.certificate_chain.as_ref() {
-        let tls_config = cert_chain.create_server_config()?;
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config));
+    let tls_config = if let Some(pre_built) = config.server_tls_config {
+        Some(pre_built)
+    } else if let Some(cert_chain) = config.certificate_chain.as_ref() {
+        Some(Arc::new(cert_chain.create_server_config()?))
+    } else {
+        None
+    };
+
+    if let Some(tls_config) = tls_config {
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
 
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();

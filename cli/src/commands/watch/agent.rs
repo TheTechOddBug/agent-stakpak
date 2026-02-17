@@ -87,6 +87,8 @@ pub struct SpawnConfig {
     pub enable_subagents: bool,
     /// Pause when tools require approval instead of auto-approving.
     pub pause_on_approval: bool,
+    /// Run agent tool calls inside a sandboxed warden container.
+    pub sandbox: bool,
     /// Agent server connection.
     pub server: AgentServerConnection,
 }
@@ -154,6 +156,7 @@ async fn run_server_session(
 
     let opts = SendMessageOptions {
         model: server.model.clone(),
+        sandbox: if config.sandbox { Some(true) } else { None },
         ..Default::default()
     };
 
