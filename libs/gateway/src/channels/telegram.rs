@@ -105,12 +105,13 @@ impl TelegramChannel {
     }
 
     async fn send_chunk(&self, chat_id: i64, thread_id: Option<i64>, text: &str) -> Result<()> {
-        let params = SendMessageParams {
+        let mut params = SendMessageParams {
             chat_id,
             text: text.to_string(),
             parse_mode: None,
             reply_to_message_id: None,
             message_thread_id: thread_id,
+            disable_notification: None,
         };
 
         loop {
@@ -136,18 +137,33 @@ impl TelegramChannel {
                 let retry_after = payload
                     .parameters
                     .as_ref()
-                    .and_then(|params| params.retry_after)
+                    .and_then(|p| p.retry_after)
                     .unwrap_or(1);
                 tokio::time::sleep(std::time::Duration::from_secs(retry_after as u64)).await;
+                continue;
+            }
+
+            let description = payload
+                .description
+                .unwrap_or_else(|| "unknown error".to_string());
+
+            // Retry as plain text if the error is parse_mode related
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && params.parse_mode.is_some()
+                && description.to_lowercase().contains("parse")
+            {
+                warn!(
+                    parse_mode = ?params.parse_mode,
+                    "telegram parse_mode rejected, retrying as plain text"
+                );
+                params.parse_mode = None;
                 continue;
             }
 
             return Err(anyhow!(
                 "telegram sendMessage error {}: {}",
                 payload.error_code.unwrap_or_default(),
-                payload
-                    .description
-                    .unwrap_or_else(|| "unknown error".to_string())
+                description
             ));
         }
     }
@@ -307,18 +323,24 @@ fn parse_i64_value(value: &serde_json::Value) -> Option<i64> {
 
 #[derive(Debug, Serialize)]
 struct GetUpdatesParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<i64>,
     timeout: i64,
     allowed_updates: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SendMessageParams {
     chat_id: i64,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parse_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disable_notification: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
