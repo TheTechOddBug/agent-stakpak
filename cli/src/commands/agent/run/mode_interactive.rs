@@ -522,6 +522,71 @@ pub async fn run_interactive(
                         }
                     }
                     OutputEvent::AcceptTool(tool_call) => {
+                        // Check if this is the ask_user tool - handle it specially
+                        let tool_name = tool_call
+                            .function
+                            .name
+                            .strip_prefix("stakpak__")
+                            .unwrap_or(&tool_call.function.name);
+                        if tool_name == "ask_user" {
+                            // Parse the questions from the tool call arguments
+                            match serde_json::from_str::<serde_json::Value>(
+                                &tool_call.function.arguments,
+                            ) {
+                                Ok(args) => {
+                                    if let Some(questions_value) = args.get("questions") {
+                                        match serde_json::from_value::<
+                                            Vec<
+                                                stakpak_shared::models::integrations::openai::AskUserQuestion,
+                                            >,
+                                        >(
+                                            questions_value.clone()
+                                        ) {
+                                            Ok(questions) => {
+                                                // Send the popup event to TUI
+                                                send_input_event(
+                                                    &input_tx,
+                                                    InputEvent::ShowAskUserPopup(
+                                                        tool_call.clone(),
+                                                        questions,
+                                                    ),
+                                                )
+                                                .await?;
+                                                // Don't continue - wait for AskUserResponse
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                // Failed to parse questions - return error result
+                                                messages.push(tool_result(
+                                                    tool_call.id.clone(),
+                                                    format!(
+                                                        "Failed to parse questions: {}",
+                                                        e
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        // No questions field - return error result
+                                        messages.push(tool_result(
+                                            tool_call.id.clone(),
+                                            "Missing 'questions' field in ask_user arguments"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    // Failed to parse arguments - return error result
+                                    messages.push(tool_result(
+                                        tool_call.id.clone(),
+                                        format!("Failed to parse ask_user arguments: {}", e),
+                                    ));
+                                }
+                            }
+                            // If we get here, there was an error - continue to next iteration
+                            continue;
+                        }
+
                         send_input_event(
                             &input_tx,
                             InputEvent::StartLoadingOperation(LoadingOperation::ToolExecution),
@@ -1005,6 +1070,19 @@ pub async fn run_interactive(
                         .await?;
                         continue;
                     }
+                    OutputEvent::AskUserResponse(tool_call_result) => {
+                        // User responded to ask_user popup - add the result to messages
+                        messages.push(tool_result(
+                            tool_call_result.call.id.clone(),
+                            tool_call_result.result.clone(),
+                        ));
+
+                        // Display the result in the TUI
+                        send_input_event(&input_tx, InputEvent::ToolResult(tool_call_result))
+                            .await?;
+
+                        // Continue to send to API
+                    }
                 }
 
                 // Skip sending to API if there are pending tool calls without tool_results
@@ -1231,8 +1309,37 @@ pub async fn run_interactive(
                             tools_queue.extend(tool_calls.clone());
 
                             // Send the first tool call to show in UI
+                            // But auto-approve ask_user tool
                             if !tools_queue.is_empty() {
                                 let tool_call = tools_queue.remove(0);
+                                let tool_name = tool_call
+                                    .function
+                                    .name
+                                    .strip_prefix("stakpak__")
+                                    .unwrap_or(&tool_call.function.name);
+
+                                if tool_name == "ask_user" {
+                                    // Auto-approve ask_user - parse and show popup directly
+                                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(
+                                        &tool_call.function.arguments,
+                                    )
+                                        && let Some(questions_value) = args.get("questions")
+                                        && let Ok(questions) = serde_json::from_value::<
+                                            Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+                                        >(questions_value.clone())
+                                    {
+                                        send_input_event(
+                                            &input_tx,
+                                            InputEvent::ShowAskUserPopup(
+                                                tool_call.clone(),
+                                                questions,
+                                            ),
+                                        )
+                                        .await?;
+                                        continue;
+                                    }
+                                    // If parsing failed, fall through to normal flow
+                                }
                                 send_tool_call(&input_tx, &tool_call).await?;
                                 continue;
                             }

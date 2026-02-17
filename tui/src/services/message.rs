@@ -2193,6 +2193,21 @@ pub fn extract_truncated_command_arguments(tool_call: &ToolCall, sign: Option<St
         return format!("{}{} ({} tools)", desc, sandbox_tag, tools_count);
     }
 
+    // For ask_user, show question labels
+    if tool_name == "ask_user"
+        && let Ok(ref args) = arguments
+        && let Some(questions) = args.get("questions").and_then(|v| v.as_array())
+    {
+        let labels: Vec<&str> = questions
+            .iter()
+            .filter_map(|q| q.get("label").and_then(|l| l.as_str()))
+            .collect();
+        if !labels.is_empty() {
+            return format!("questions: {}", labels.join(", "));
+        }
+        return format!("{} question(s)", questions.len());
+    }
+
     const KEYWORDS: [&str; 6] = ["path", "file", "uri", "url", "command", "keywords"];
 
     if let Ok(arguments) = arguments {
@@ -2482,6 +2497,7 @@ pub fn get_command_type_name(tool_call: &ToolCall) -> String {
                 format!("Subagent: {}", desc)
             }
         }
+        "ask_user" => "Ask User".to_string(),
         _ => {
             // Convert function name to title case
             crate::utils::strip_tool_name(&tool_call.function.name)
