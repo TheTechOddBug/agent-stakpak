@@ -980,8 +980,8 @@ async fn start_foreground_runtime(
     };
 
     let mcp_init_config = crate::commands::agent::run::mcp_init::McpInitConfig {
-        redact_secrets: true,
-        privacy_mode: false,
+        redact_secrets: true, // applied in proxy layer
+        privacy_mode: false,  // applied in proxy layer
         enabled_tools: stakpak_mcp_server::EnabledToolsConfig { slack: false },
         enable_mtls: true,
         enable_subagents: true,
@@ -1030,8 +1030,7 @@ async fn start_foreground_runtime(
         Some(mcp_init_result.proxy_shutdown_tx),
     );
 
-    // --- 3. Gateway runtime ---
-    let config_path = AutopilotConfigFile::path();
+    // --- 2. Loopback connection for schedule + gateway runtimes ---
     let loopback_url = loopback_server_url(listener_addr);
     let loopback_token = if options.no_auth {
         String::new()
@@ -1039,9 +1038,12 @@ async fn start_foreground_runtime(
         generated_auth_token.clone().unwrap_or_default()
     };
 
+    // --- 3. Gateway runtime ---
+    let config_path = AutopilotConfigFile::path();
+
     let gateway_cli = stakpak_gateway::GatewayCliFlags {
-        url: Some(loopback_url),
-        token: Some(loopback_token),
+        url: Some(loopback_url.clone()),
+        token: Some(loopback_token.clone()),
         ..Default::default()
     };
 
@@ -1094,6 +1096,10 @@ async fn start_foreground_runtime(
 
     let shutdown_state = app_state.clone();
     let shutdown_refresh_tx = refresh_shutdown_tx.clone();
+    let server_model_id = app_state
+        .default_model
+        .as_ref()
+        .map(|m| format!("{}/{}", m.provider, m.id));
 
     let base_app = stakpak_server::router(app_state, auth_config);
     let app = if let Some(gateway_runtime) = gateway_runtime.as_ref() {
@@ -1117,8 +1123,13 @@ async fn start_foreground_runtime(
 
     // --- 4. Schedule runtime (spawned AFTER all SQLite initialization to avoid
     //     sqlite3Close/sqlite3_open race in libsql on musl) ---
-    let schedule_task = tokio::spawn(async {
-        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
+    let schedule_server = crate::commands::watch::AgentServerConnection {
+        url: loopback_url,
+        token: loopback_token,
+        model: server_model_id,
+    };
+    let schedule_task = tokio::spawn(async move {
+        if let Err(error) = crate::commands::watch::commands::run_scheduler(schedule_server).await {
             eprintln!("Schedule runtime exited: {}", error);
         }
     });

@@ -121,28 +121,10 @@ impl AuthConfig {
 pub struct MCPServerConfig {
     pub client: Option<Arc<dyn AgentProvider>>,
     pub bind_address: String,
-    pub redact_secrets: bool,
-    pub privacy_mode: bool,
     pub enabled_tools: EnabledToolsConfig,
     pub tool_mode: ToolMode,
     pub enable_subagents: bool,
     pub certificate_chain: Arc<Option<CertificateChain>>,
-}
-
-/// Initialize gitleaks configuration if secret redaction is enabled
-async fn init_gitleaks_if_needed(redact_secrets: bool, privacy_mode: bool) {
-    if redact_secrets {
-        tokio::spawn(async move {
-            match std::panic::catch_unwind(|| {
-                stakpak_shared::secrets::initialize_gitleaks_config(privacy_mode)
-            }) {
-                Ok(_rule_count) => {}
-                Err(_) => {
-                    // Failed to initialize, will initialize on first use
-                }
-            }
-        });
-    }
 }
 
 /// Create graceful shutdown handler
@@ -234,8 +216,6 @@ fn build_tool_container(
 
             ToolContainer::new(
                 None,
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
@@ -253,8 +233,6 @@ fn build_tool_container(
 
             ToolContainer::new(
                 config.client.clone(),
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
@@ -274,8 +252,6 @@ fn build_tool_container(
 
             ToolContainer::new(
                 config.client.clone(),
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
@@ -296,8 +272,6 @@ async fn start_server_internal(
     tcp_listener: TcpListener,
     shutdown_rx: Option<Receiver<()>>,
 ) -> Result<()> {
-    init_gitleaks_if_needed(config.redact_secrets, config.privacy_mode).await;
-
     // Create and start TaskManager
     let task_manager = TaskManager::new();
     let task_manager_handle = task_manager.handle();
@@ -364,8 +338,6 @@ pub async fn start_server_stdio(
     config: MCPServerConfig,
     shutdown_rx: Option<Receiver<()>>,
 ) -> Result<()> {
-    init_gitleaks_if_needed(config.redact_secrets, config.privacy_mode).await;
-
     // Create and start TaskManager
     let task_manager = TaskManager::new();
     let task_manager_handle = task_manager.handle();
