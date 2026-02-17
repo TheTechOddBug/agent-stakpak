@@ -2,7 +2,7 @@ use crate::tool_container::ToolContainer;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, handler::server::wrapper::Parameters, model::*, schemars, tool};
 use rmcp::{RoleServer, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use stakpak_shared::file_backup_manager::FileBackupManager;
 use stakpak_shared::remote_connection::{
     PathLocation, RemoteConnection, RemoteConnectionInfo, RemoteFileSystemProvider,
@@ -45,12 +45,24 @@ pub struct RunCommandRequest {
     pub description: Option<String>,
     #[schemars(description = "Optional timeout for the command execution in seconds")]
     pub timeout: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_trimmed_string"
+    )]
     #[schemars(
-        description = "Optional remote connection string (format: user@host or user@host:port)"
+        description = "Optional remote connection string (format: user@host or user@host:port). Omit this field for local execution; do not send an empty string."
     )]
     pub remote: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_preserved_string"
+    )]
     #[schemars(description = "Optional password for remote connection")]
     pub password: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_trimmed_string"
+    )]
     #[schemars(description = "Optional path to private key for remote connection")]
     pub private_key_path: Option<String>,
 }
@@ -59,6 +71,39 @@ pub struct RunCommandRequest {
 pub struct CommandResult {
     pub output: String,
     pub exit_code: i32,
+}
+
+fn deserialize_optional_nonempty_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
+}
+
+fn deserialize_optional_nonempty_preserved_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        if raw.trim().is_empty() {
+            None
+        } else {
+            Some(raw)
+        }
+    }))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3176,6 +3221,28 @@ fn unicode_normalized_replace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_command_request_empty_remote_is_none() {
+        let request: RunCommandRequest = serde_json::from_value(serde_json::json!({
+            "command": "echo hello",
+            "remote": "   "
+        }))
+        .expect("run command request should deserialize");
+
+        assert!(request.remote.is_none());
+    }
+
+    #[test]
+    fn run_command_request_password_preserves_whitespace() {
+        let request: RunCommandRequest = serde_json::from_value(serde_json::json!({
+            "command": "echo hello",
+            "password": "  pass with spaces  "
+        }))
+        .expect("run command request should deserialize");
+
+        assert_eq!(request.password.as_deref(), Some("  pass with spaces  "));
+    }
 
     // ---------------------------------------------------------------
     // normalize_unicode_char / normalize_unicode_to_ascii
