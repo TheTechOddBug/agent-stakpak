@@ -386,55 +386,54 @@ fn render_messages(f: &mut Frame, state: &mut AppState, area: Rect, width: usize
     }
 
     // Apply hover highlighting for user messages
-    let visible_lines = if let Some(hover_row) = state.hover_row {
-        let row_in_message_area =
-            (hover_row as usize).saturating_sub(state.message_area_y as usize);
+    let visible_lines =
+        if let Some(hover_row) = state.hover_row {
+            let row_in_message_area =
+                (hover_row as usize).saturating_sub(state.message_area_y as usize);
 
-        // Check if hover is within message area
-        if row_in_message_area < height {
-            let absolute_line = scroll + row_in_message_area;
+            // Check if hover is within message area
+            if row_in_message_area < height {
+                let absolute_line = scroll + row_in_message_area;
 
-            // Check if this line is a user message
-            let is_user_message =
-                state
-                    .line_to_message_map
-                    .iter()
-                    .any(|(start, end, _, is_user, _)| {
+                // Check if this line is a user message
+                let is_user_message = state.line_to_message_map.iter().any(
+                    |(start, end, _, is_user, _, _user_idx)| {
                         *is_user && absolute_line >= *start && absolute_line < *end
-                    });
+                    },
+                );
 
-            if is_user_message {
-                // Highlight this line with subtle dark background
-                visible_lines
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, line)| {
-                        if i == row_in_message_area {
-                            Line::from(
-                                line.spans
-                                    .into_iter()
-                                    .map(|span| {
-                                        ratatui::text::Span::styled(
-                                            span.content,
-                                            span.style.bg(Color::Indexed(240)).fg(Color::White),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                        } else {
-                            line
-                        }
-                    })
-                    .collect()
+                if is_user_message {
+                    // Highlight this line with subtle dark background
+                    visible_lines
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, line)| {
+                            if i == row_in_message_area {
+                                Line::from(
+                                    line.spans
+                                        .into_iter()
+                                        .map(|span| {
+                                            ratatui::text::Span::styled(
+                                                span.content,
+                                                span.style.bg(Color::Indexed(240)).fg(Color::White),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>(),
+                                )
+                            } else {
+                                line
+                            }
+                        })
+                        .collect()
+                } else {
+                    visible_lines
+                }
             } else {
                 visible_lines
             }
         } else {
             visible_lines
-        }
-    } else {
-        visible_lines
-    };
+        };
 
     // Apply selection highlighting if active
     let visible_lines = if state.selection.active {

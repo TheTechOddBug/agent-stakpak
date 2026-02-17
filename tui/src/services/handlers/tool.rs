@@ -511,6 +511,9 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
     // Normalize/Strip tool name for checking
     let tool_name_stripped = crate::utils::strip_tool_name(function_name);
 
+    // Get current user message index for tracking (used for selective revert)
+    let user_msg_index = state.user_message_count;
+
     match tool_name_stripped {
         "write_to_file" | "create" | "create_file" => {
             if let Some(path) = args
@@ -548,7 +551,8 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
 
                 let edit = FileEdit::new(summary.to_string())
                     .with_stats(line_count, 0)
-                    .with_tool_call(result.call.clone());
+                    .with_tool_call(result.call.clone())
+                    .with_user_message_index(user_msg_index);
 
                 state.changeset.track_file(path, edit);
 
@@ -575,6 +579,43 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
                     return;
                 }
 
+                // Backup original file content before first modification (for reliable revert)
+                let is_first_edit = !state.changeset.files.contains_key(path);
+                if is_first_edit
+                    && std::path::Path::new(path).exists()
+                    && let Some(backup_path) = backup_original_file(path, &state.session_id)
+                {
+                    // Store backup path on the tracked file (will be created by track_file)
+                    // We need to track first, then set the backup path
+                    let (added, removed) = parse_diff_stats(&result.result);
+                    let summary = if tool_name_stripped == "replace_file_content"
+                        || tool_name_stripped == "str_replace"
+                    {
+                        "Edited file"
+                    } else {
+                        "Multi-edit file"
+                    };
+                    let diff_preview = extract_diff_preview(&result.result);
+
+                    let mut edit = FileEdit::new(summary.to_string())
+                        .with_stats(added, removed)
+                        .with_tool_call(result.call.clone())
+                        .with_user_message_index(user_msg_index);
+
+                    if let Some(preview) = diff_preview {
+                        edit = edit.with_diff_preview(preview);
+                    }
+
+                    state.changeset.track_file(path, edit);
+                    state.changeset.set_original_backup(path, backup_path);
+
+                    // If file does not exist, mark it as Deleted immediately
+                    if !std::path::Path::new(path).exists() {
+                        state.changeset.mark_removed(path, None);
+                    }
+                    return;
+                }
+
                 // Parse diff from the result message
                 let (added, removed) = parse_diff_stats(&result.result);
 
@@ -591,7 +632,8 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
 
                 let mut edit = FileEdit::new(summary.to_string())
                     .with_stats(added, removed)
-                    .with_tool_call(result.call.clone());
+                    .with_tool_call(result.call.clone())
+                    .with_user_message_index(user_msg_index);
 
                 if let Some(preview) = diff_preview {
                     edit = edit.with_diff_preview(preview);
@@ -620,6 +662,56 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
         }
         _ => {}
     }
+}
+
+/// Backup original file content before first modification
+/// Returns the backup path on success
+fn backup_original_file(path: &str, session_id: &str) -> Option<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Get home directory
+    let home_dir = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log::warn!("Could not determine home directory for backup");
+            return None;
+        }
+    };
+
+    // Create backup directory
+    let backup_dir = home_dir
+        .join(".stakpak")
+        .join("sessions")
+        .join(session_id)
+        .join("original_backups");
+
+    if let Err(e) = std::fs::create_dir_all(&backup_dir) {
+        log::warn!("Failed to create backup directory: {}", e);
+        return None;
+    }
+
+    // Create a hash of the path for the backup filename (to avoid path conflicts)
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = hasher.finish();
+
+    // Also include the filename for readability
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let backup_filename = format!("{}_{:x}", file_name, path_hash);
+    let backup_path = backup_dir.join(&backup_filename);
+
+    // Copy the original file to backup
+    if let Err(e) = std::fs::copy(path, &backup_path) {
+        log::warn!("Failed to backup original file {}: {}", path, e);
+        return None;
+    }
+
+    Some(backup_path.to_string_lossy().to_string())
 }
 
 /// Extract backup path from the XML output

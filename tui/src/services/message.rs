@@ -1120,7 +1120,9 @@ pub fn get_wrapped_message_lines_cached(state: &mut AppState, width: usize) -> V
     let mut all_processed_lines: Vec<Line<'static>> = Vec::with_capacity(estimated_lines);
 
     // Build line-to-message mapping for click detection
-    let mut line_to_message_map: Vec<(usize, usize, Uuid, bool, String)> = Vec::new();
+    // Format: (start_line, end_line, message_id, is_user_message, message_text, user_message_index)
+    let mut line_to_message_map: Vec<(usize, usize, Uuid, bool, String, usize)> = Vec::new();
+    let mut user_message_counter: usize = 0;
 
     // Process each message, using cache when available
     for msg in &message_refs {
@@ -1129,7 +1131,10 @@ pub fn get_wrapped_message_lines_cached(state: &mut AppState, width: usize) -> V
 
         // Check if this is a user message and extract text
         let (is_user_message, message_text) = match &msg.content {
-            MessageContent::UserMessage(text) => (true, text.clone()),
+            MessageContent::UserMessage(text) => {
+                user_message_counter += 1;
+                (true, text.clone())
+            }
             _ => (false, String::new()),
         };
 
@@ -1163,7 +1168,14 @@ pub fn get_wrapped_message_lines_cached(state: &mut AppState, width: usize) -> V
 
         // Only track user messages in the map (for efficiency)
         if is_user_message && end_line > start_line {
-            line_to_message_map.push((start_line, end_line, msg.id, true, message_text));
+            line_to_message_map.push((
+                start_line,
+                end_line,
+                msg.id,
+                true,
+                message_text,
+                user_message_counter,
+            ));
         }
     }
 
@@ -1193,26 +1205,27 @@ pub fn get_wrapped_message_lines_cached(state: &mut AppState, width: usize) -> V
     let mut all_processed_lines = collapsed_lines;
 
     // Adjust line_to_message_map indices based on collapsed lines
-    let adjusted_line_to_message_map: Vec<(usize, usize, Uuid, bool, String)> = line_to_message_map
-        .into_iter()
-        .filter_map(|(start, end, id, is_user, text)| {
-            // Find the new start index (first non-None mapping at or after old start)
-            let new_start =
-                (start..end).find_map(|i| old_to_new_index.get(i).and_then(|&idx| idx))?;
+    let adjusted_line_to_message_map: Vec<(usize, usize, Uuid, bool, String, usize)> =
+        line_to_message_map
+            .into_iter()
+            .filter_map(|(start, end, id, is_user, text, user_idx)| {
+                // Find the new start index (first non-None mapping at or after old start)
+                let new_start =
+                    (start..end).find_map(|i| old_to_new_index.get(i).and_then(|&idx| idx))?;
 
-            // Find the new end index (last non-None mapping before old end, +1)
-            let new_end = (start..end)
-                .rev()
-                .find_map(|i| old_to_new_index.get(i).and_then(|&idx| idx))
-                .map(|i| i + 1)?;
+                // Find the new end index (last non-None mapping before old end, +1)
+                let new_end = (start..end)
+                    .rev()
+                    .find_map(|i| old_to_new_index.get(i).and_then(|&idx| idx))
+                    .map(|i| i + 1)?;
 
-            if new_end > new_start {
-                Some((new_start, new_end, id, is_user, text))
-            } else {
-                None
-            }
-        })
-        .collect();
+                if new_end > new_start {
+                    Some((new_start, new_end, id, is_user, text, user_idx))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
     let line_to_message_map = adjusted_line_to_message_map;
 

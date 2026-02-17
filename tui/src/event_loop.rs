@@ -132,7 +132,7 @@ pub async fn run_tui(
     {
         state.messages.push(Message::user(prompt.clone(), None));
         crate::services::message::invalidate_message_lines_cache(&mut state);
-        let _ = output_tx.try_send(OutputEvent::UserMessage(prompt, None, Vec::new()));
+        let _ = output_tx.try_send(OutputEvent::UserMessage(prompt, None, Vec::new(), None));
     }
 
     let internal_tx_thread = internal_tx.clone();

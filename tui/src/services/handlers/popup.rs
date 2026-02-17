@@ -967,6 +967,68 @@ pub fn handle_message_action_popup_execute(state: &mut AppState) {
                 }
             }
         }
+        MessageAction::RevertToMessage => {
+            if let Some(target_id) = state.message_action_target_message_id {
+                // Find the user message index from the line_to_message_map
+                let target_user_idx = state
+                    .line_to_message_map
+                    .iter()
+                    .find(|(_, _, id, is_user, _, user_idx)| {
+                        *id == target_id && *is_user && *user_idx > 0
+                    })
+                    .map(|(_, _, _, _, _, user_idx)| *user_idx);
+
+                if let Some(target_idx) = target_user_idx {
+                    // Revert file changes for edits at or after target_idx
+                    // (the clicked message and everything after it)
+                    let revert_result = state
+                        .changeset
+                        .revert_from_user_message(target_idx, &state.session_id);
+
+                    // Find the TUI message index and truncate
+                    if let Some(msg_idx) = state.messages.iter().position(|m| m.id == target_id) {
+                        // Truncate messages - remove target message and everything after
+                        state.messages.truncate(msg_idx);
+                    }
+
+                    // Store pending revert for backend sync
+                    state.pending_revert_index = Some(target_idx);
+
+                    // Update user_message_count to match the new state
+                    // We removed the clicked message (target_idx) and everything after,
+                    // so we now have (target_idx - 1) user messages remaining
+                    state.user_message_count = target_idx.saturating_sub(1);
+
+                    // Clear todos
+                    state.todos.clear();
+
+                    // Invalidate message cache
+                    invalidate_message_lines_cache(state);
+
+                    // Show appropriate toast
+                    match revert_result {
+                        Ok((files_reverted, files_deleted)) => {
+                            let message = if files_reverted > 0 || files_deleted > 0 {
+                                format!(
+                                    "Reverted {} file(s), deleted {} created file(s)",
+                                    files_reverted, files_deleted
+                                )
+                            } else {
+                                "Reverted to message".to_string()
+                            };
+                            state.toast = Some(Toast::success(&message));
+                        }
+                        Err(e) => {
+                            log::warn!("Revert failed: {}", e);
+                            state.toast =
+                                Some(Toast::success("Reverted messages (file revert failed)"));
+                        }
+                    }
+                } else {
+                    state.toast = Some(Toast::error("Could not find message index"));
+                }
+            }
+        }
     }
 
     handle_message_action_popup_close(state);

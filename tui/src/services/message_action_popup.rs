@@ -1,7 +1,7 @@
 //! Message Action Popup
 //!
 //! A popup that appears when left-clicking on a user message.
-//! Provides actions like copying the message text.
+//! Provides actions like copying the message text or reverting to that point.
 
 use ratatui::{
     Frame,
@@ -18,11 +18,12 @@ use crate::app::AppState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageAction {
     CopyMessage,
+    RevertToMessage,
 }
 
 impl MessageAction {
     pub fn all() -> Vec<Self> {
-        vec![Self::CopyMessage]
+        vec![Self::CopyMessage, Self::RevertToMessage]
     }
 }
 
@@ -32,9 +33,9 @@ pub fn render_message_action_popup(f: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Calculate popup size - centered, max width 50, height for 1 item + title + padding
+    // Calculate popup size - centered, max width 50, height for 2 items + title + padding
     let popup_width: u16 = 50;
-    let popup_height: u16 = 6; // Title + 1 item + borders + padding
+    let popup_height: u16 = 7; // Title + 2 items + borders + padding
 
     let terminal_area = f.area();
     let x = (terminal_area.width.saturating_sub(popup_width)) / 2;
@@ -87,6 +88,7 @@ pub fn render_message_action_popup(f: &mut Frame, state: &AppState) {
 
         let (highlight_word, rest_text) = match action {
             MessageAction::CopyMessage => ("Copy", " message text to clipboard"),
+            MessageAction::RevertToMessage => ("Revert", " undo messages and file changes"),
         };
 
         // Full width background for selected item
@@ -139,7 +141,7 @@ pub fn get_selected_action(state: &AppState) -> Option<MessageAction> {
 /// Uses the line_to_message_map that was built during rendering
 pub fn find_user_message_at_line(state: &AppState, absolute_line: usize) -> Option<(Uuid, String)> {
     // Search through the line-to-message map to find which user message contains this line
-    for (start_line, end_line, msg_id, is_user, text) in &state.line_to_message_map {
+    for (start_line, end_line, msg_id, is_user, text, _user_idx) in &state.line_to_message_map {
         if *is_user && absolute_line >= *start_line && absolute_line < *end_line {
             return Some((*msg_id, text.clone()));
         }

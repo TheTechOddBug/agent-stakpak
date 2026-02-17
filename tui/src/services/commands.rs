@@ -358,6 +358,7 @@ pub fn execute_command(command_id: CommandId, ctx: CommandContext) -> Result<(),
                 prompt.clone(),
                 ctx.state.shell_tool_calls.clone(),
                 Vec::new(), // No image parts for command
+                None,       // No revert index
             ));
             ctx.state.shell_tool_calls = None;
             ctx.state.text_area.set_text("");
@@ -492,6 +493,7 @@ pub fn execute_command(command_id: CommandId, ctx: CommandContext) -> Result<(),
                 prompt,
                 ctx.state.shell_tool_calls.clone(),
                 Vec::new(), // No image parts for command
+                None,       // No revert index
             ));
             ctx.state.shell_tool_calls = None;
             ctx.state.text_area.set_text("");
