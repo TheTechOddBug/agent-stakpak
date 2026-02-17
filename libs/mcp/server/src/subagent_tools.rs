@@ -12,6 +12,9 @@ use stakpak_shared::local_store::LocalStore;
 use tracing::error;
 use uuid::Uuid;
 
+/// Container path for mounted host config files (when config is outside default).
+const CONTAINER_HOST_CONFIG_MOUNT: &str = "/agent/host-stakpak-config";
+
 /// Request for creating a dynamic subagent with full control over its configuration.
 /// Based on the AOrchestra 4-tuple model: (Instruction, Context, Tools, Model)
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -463,8 +466,8 @@ NOTES:
         // Build the stakpak command arguments
         let mut args = vec![exe_for_command.clone(), "-a".to_string()];
 
-        // Add profile and config so subagent uses same profile/config as main agent (only when set)
-        if let Some(profile) = profile_name.filter(|p| *p != "default") {
+        // Add profile and config so subagent uses same profile/config as main agent (skip empty to avoid broken command)
+        if let Some(profile) = profile_name.filter(|p| !p.is_empty()) {
             args.extend(["--profile".to_string(), profile.to_string()]);
         }
         if let Some(path) = config_path.filter(|p| !p.is_empty()) {
@@ -520,12 +523,13 @@ NOTES:
             });
             if let Some((ref parent, ref _filename)) = config_mount {
                 warden_command.push_str(&format!(
-                    " -v {}:/agent/host-stakpak-config:ro",
-                    parent.display()
+                    " -v {}:{}:ro",
+                    parent.display(),
+                    CONTAINER_HOST_CONFIG_MOUNT
                 ));
             }
             let container_config_path = config_mount
-                .map(|(_parent, filename)| format!("/agent/host-stakpak-config/{}", filename));
+                .map(|(_parent, filename)| format!("{}/{}", CONTAINER_HOST_CONFIG_MOUNT, filename));
 
             // Add default sandbox volumes for read-only access
             // Working directory (read-only)

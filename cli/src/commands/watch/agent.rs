@@ -115,8 +115,8 @@ pub async fn spawn_agent(config: SpawnConfig) -> Result<AgentResult, AgentError>
         .arg("-o")
         .arg("json"); // JSON output for robust parsing
 
-    // Only pass --profile when explicitly set (not default)
-    if config.profile != "default" {
+    // Only pass --profile when non-empty (empty string would break the command)
+    if !config.profile.is_empty() {
         cmd.arg("--profile").arg(&config.profile);
     }
 

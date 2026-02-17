@@ -388,8 +388,8 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
     // Set environment variable to prevent infinite recursion
     cmd.args(["--env", "STAKPAK_SKIP_WARDEN=1"]);
 
-    // Pass the profile through from config only when explicitly set (not default)
-    if config.profile_name != "default" {
+    // Pass the profile through from config (skip only when empty to avoid broken command)
+    if !config.profile_name.is_empty() {
         cmd.args(["--env", &format!("STAKPAK_PROFILE={}", config.profile_name)]);
     }
 

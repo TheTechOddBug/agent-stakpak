@@ -2582,7 +2582,7 @@ fn install_systemd_service(config: &AppConfig) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
     let mut exec_parts = vec![binary.display().to_string()];
-    if config.profile_name != "default" {
+    if !config.profile_name.is_empty() {
         exec_parts.push("--profile".to_string());
         exec_parts.push(config.profile_name.clone());
     }
@@ -2664,7 +2664,7 @@ fn install_launchd_service(config: &AppConfig) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
     let mut args = Vec::new();
-    if config.profile_name != "default" {
+    if !config.profile_name.is_empty() {
         args.push("<string>--profile</string>".to_string());
         args.push(format!(
             "<string>{}</string>",
