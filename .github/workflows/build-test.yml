@@ -21,39 +21,25 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact_name: stakpak-linux-aarch64
             features: --features jemalloc
-            musl_toolchain: aarch64-linux-musl-native
+            docker: rust:1.91-alpine3.21
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.91.0
+      # Alpine Linux is musl-native — GCC has full C11 atomics support
+      # without the broken musl-gcc wrapper that Ubuntu's musl-tools uses.
+      - name: Build and test in Alpine container
+        if: matrix.docker
+        uses: addnab/docker-run-action@v3
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.target }}
-
-      - name: Install MUSL tools (apt)
-        if: endsWith(matrix.target, 'linux-musl') && !matrix.musl_toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      # Ubuntu's musl-tools wrapper on aarch64 has a broken cross-compilation
-      # setup that fails all jemalloc atomics link tests. Use a complete
-      # musl.cc native toolchain instead.
-      - name: Install musl.cc toolchain
-        if: matrix.musl_toolchain
-        run: |
-          curl -fL --retry 3 -o /tmp/musl-toolchain.tgz https://musl.cc/${{ matrix.musl_toolchain }}.tgz
-          sudo tar xzf /tmp/musl-toolchain.tgz -C /usr/local
-          echo "/usr/local/${{ matrix.musl_toolchain }}/bin" >> $GITHUB_PATH
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
-
-      - name: Run tests
-        run: cargo test --target ${{ matrix.target }}
+          image: ${{ matrix.docker }}
+          options: >-
+            --user 0:0
+            -v ${{ github.workspace }}:/build
+            -w /build
+          run: |
+            apk add --no-cache gcc musl-dev
+            cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+            cargo test --target ${{ matrix.target }}
