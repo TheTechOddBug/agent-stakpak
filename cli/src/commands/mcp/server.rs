@@ -9,8 +9,6 @@ use crate::{commands::get_client, config::AppConfig};
 /// Start the MCP server (standalone HTTP/HTTPS server with tools)
 pub async fn run_server(
     config: AppConfig,
-    disable_secret_redaction: bool,
-    privacy_mode: bool,
     tool_mode: ToolMode,
     enable_slack_tools: bool,
     _index_big_project: bool,
@@ -46,12 +44,13 @@ pub async fn run_server(
 
     let protocol = if !disable_mcp_mtls { "https" } else { "http" };
     println!("MCP server started at {}://{}/mcp", protocol, bind_address);
+    println!(
+        "⚠️  Secret redaction is handled by the proxy layer. Run behind 'stakpak mcp proxy' for secret protection."
+    );
 
     start_server(
         MCPServerConfig {
             client: Some(get_client(&config).await?),
-            redact_secrets: !disable_secret_redaction,
-            privacy_mode,
             enabled_tools: EnabledToolsConfig {
                 slack: enable_slack_tools,
             },
