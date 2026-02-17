@@ -9,8 +9,8 @@
 //! 6. Handles graceful shutdown on SIGTERM/SIGINT
 
 use crate::commands::watch::{
-    RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig, assemble_prompt,
-    is_process_running, run_check_script, spawn_agent,
+    AgentServerConnection, RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig,
+    assemble_prompt, is_process_running, run_check_script, spawn_agent,
 };
 use chrono::{DateTime, Utc};
 use croner::Cron;
@@ -27,7 +27,8 @@ const HEARTBEAT_UPDATE_INTERVAL_SECONDS: u64 = 30;
 /// Run the autopilot service in foreground mode.
 ///
 /// This function blocks until the autopilot service receives a shutdown signal (SIGTERM/SIGINT).
-pub async fn run_scheduler() -> Result<(), String> {
+/// Scheduled agents run via the co-hosted agent server API.
+pub async fn run_scheduler(server: AgentServerConnection) -> Result<(), String> {
     print_banner();
 
     // Load and validate configuration
@@ -150,18 +151,23 @@ pub async fn run_scheduler() -> Result<(), String> {
     // Wrap shared state in Arc for the event loop
     let db = Arc::new(db);
     let config = Arc::new(config);
+    let server = Arc::new(server);
 
     // Spawn event handler task for scheduled schedules
     let db_clone = Arc::clone(&db);
     let config_clone = Arc::clone(&config);
+    let server_clone = Arc::clone(&server);
     let event_handler = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             let db = Arc::clone(&db_clone);
             let config = Arc::clone(&config_clone);
+            let server = Arc::clone(&server_clone);
 
             // Handle each schedule event in a separate task
             tokio::spawn(async move {
-                if let Err(e) = handle_schedule_event(&db, &config, &event.schedule).await {
+                if let Err(e) =
+                    handle_schedule_event(&db, &config, &event.schedule, &server).await
+                {
                     error!(
                         schedule = %event.schedule.name,
                         error = %e,
@@ -190,6 +196,7 @@ pub async fn run_scheduler() -> Result<(), String> {
     // Spawn pending schedule poller for manual schedule fires
     let db_clone2 = Arc::clone(&db);
     let config_clone2 = Arc::clone(&config);
+    let server_clone2 = Arc::clone(&server);
     let pending_poller = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
@@ -208,12 +215,14 @@ pub async fn run_scheduler() -> Result<(), String> {
                             let db = Arc::clone(&db_clone2);
                             let schedule = schedule.clone();
                             let config = Arc::clone(&config_clone2);
+                            let server = Arc::clone(&server_clone2);
 
                             // Handle in a separate task
                             tokio::spawn(async move {
                                 info!(schedule = %schedule.name, "Manual schedule fired");
                                 print_event("fire", &schedule.name, "Manual schedule fired");
-                                if let Err(e) = handle_schedule_event(&db, &config, &schedule).await
+                                if let Err(e) =
+                                    handle_schedule_event(&db, &config, &schedule, &server).await
                                 {
                                     error!(
                                         schedule = %schedule.name,
@@ -309,6 +318,7 @@ async fn handle_schedule_event(
     db: &ScheduleDb,
     config: &ScheduleConfig,
     schedule: &crate::commands::watch::Schedule,
+    server: &AgentServerConnection,
 ) -> Result<(), String> {
     // Singleton guard: skip if this schedule already has a running run
     match db.has_running_run(&schedule.name).await {
@@ -457,6 +467,7 @@ async fn handle_schedule_event(
         enable_slack_tools: schedule.effective_enable_slack_tools(&config.defaults),
         enable_subagents: schedule.effective_enable_subagents(&config.defaults),
         pause_on_approval: schedule.effective_pause_on_approval(&config.defaults),
+        server: server.clone(),
     };
 
     match spawn_agent(spawn_config).await {
