@@ -986,8 +986,8 @@ async fn start_foreground_runtime(
     };
 
     let mcp_init_config = crate::commands::agent::run::mcp_init::McpInitConfig {
-        redact_secrets: true,
-        privacy_mode: false,
+        redact_secrets: true, // applied in proxy layer
+        privacy_mode: false,  // applied in proxy layer
         enabled_tools: stakpak_mcp_server::EnabledToolsConfig { slack: false },
         enable_mtls: true,
         enable_subagents: true,
