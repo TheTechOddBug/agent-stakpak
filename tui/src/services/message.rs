@@ -87,6 +87,18 @@ pub enum MessageContent {
     /// Tool call streaming preview - shows tools being generated with token counters
     /// (tool_infos: Vec<ToolCallStreamInfo>)
     RenderToolCallStreamBlock(Vec<ToolCallStreamInfo>),
+    /// Ask user inline block - renders questions and options inline in the message area
+    RenderAskUserBlock {
+        questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+        answers: std::collections::HashMap<
+            String,
+            stakpak_shared::models::integrations::openai::AskUserAnswer,
+        >,
+        current_tab: usize,
+        selected_option: usize,
+        custom_input: String,
+        focused: bool,
+    },
 }
 
 /// Compute a hash of the MessageContent for cache invalidation.
@@ -257,6 +269,29 @@ pub fn hash_message_content(content: &MessageContent) -> u64 {
             for info in infos {
                 info.name.hash(&mut hasher);
                 info.args_tokens.hash(&mut hasher);
+            }
+        }
+        MessageContent::RenderAskUserBlock {
+            questions,
+            answers,
+            current_tab,
+            selected_option,
+            custom_input,
+            focused,
+        } => {
+            22u8.hash(&mut hasher);
+            questions.len().hash(&mut hasher);
+            current_tab.hash(&mut hasher);
+            selected_option.hash(&mut hasher);
+            custom_input.hash(&mut hasher);
+            focused.hash(&mut hasher);
+            answers.len().hash(&mut hasher);
+            for q in questions {
+                q.label.hash(&mut hasher);
+            }
+            for (k, v) in answers {
+                k.hash(&mut hasher);
+                v.answer.hash(&mut hasher);
             }
         }
     }
@@ -561,6 +596,32 @@ impl Message {
         Message {
             id: message_id.unwrap_or_else(Uuid::new_v4),
             content: MessageContent::RenderRunCommandBlock(command, result, state),
+            is_collapsed: None,
+        }
+    }
+
+    pub fn render_ask_user_block(
+        questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+        answers: std::collections::HashMap<
+            String,
+            stakpak_shared::models::integrations::openai::AskUserAnswer,
+        >,
+        current_tab: usize,
+        selected_option: usize,
+        custom_input: String,
+        focused: bool,
+        message_id: Option<Uuid>,
+    ) -> Self {
+        Message {
+            id: message_id.unwrap_or_else(Uuid::new_v4),
+            content: MessageContent::RenderAskUserBlock {
+                questions,
+                answers,
+                current_tab,
+                selected_option,
+                custom_input,
+                focused,
+            },
             is_collapsed: None,
         }
     }
@@ -1511,6 +1572,34 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
             let borrowed = get_wrapped_styled_block_lines(&rendered, width);
             lines.extend(convert_to_owned_lines(borrowed));
         }
+        MessageContent::RenderAskUserBlock {
+            questions,
+            answers,
+            current_tab,
+            selected_option,
+            custom_input,
+            focused,
+        } => {
+            let rendered = crate::services::bash_block::render_ask_user_block(
+                questions,
+                answers,
+                *current_tab,
+                *selected_option,
+                custom_input,
+                width,
+                *focused,
+            );
+            let borrowed = get_wrapped_styled_block_lines(&rendered, width);
+            lines.push((
+                Line::from(vec![Span::from("SPACING_MARKER")]),
+                Style::default(),
+            ));
+            lines.extend(convert_to_owned_lines(borrowed));
+            lines.push((
+                Line::from(vec![Span::from("SPACING_MARKER")]),
+                Style::default(),
+            ));
+        }
     }
 
     lines
@@ -2153,6 +2242,27 @@ fn get_wrapped_message_lines_internal(
             MessageContent::RenderToolCallStreamBlock(infos) => {
                 let rendered_lines =
                     crate::services::bash_block::render_tool_call_stream_block(infos, width);
+                let borrowed_lines = get_wrapped_styled_block_lines(&rendered_lines, width);
+                let owned_lines = convert_to_owned_lines(borrowed_lines);
+                all_lines.extend(owned_lines);
+            }
+            MessageContent::RenderAskUserBlock {
+                questions,
+                answers,
+                current_tab,
+                selected_option,
+                custom_input,
+                focused,
+            } => {
+                let rendered_lines = crate::services::bash_block::render_ask_user_block(
+                    questions,
+                    answers,
+                    *current_tab,
+                    *selected_option,
+                    custom_input,
+                    width,
+                    *focused,
+                );
                 let borrowed_lines = get_wrapped_styled_block_lines(&rendered_lines, width);
                 let owned_lines = convert_to_owned_lines(borrowed_lines);
                 all_lines.extend(owned_lines);

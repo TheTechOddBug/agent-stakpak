@@ -4,13 +4,21 @@
 //! option selection, custom input, and submission.
 
 use crate::app::{AppState, OutputEvent};
-use crate::services::ask_user_popup::get_total_options;
 use stakpak_shared::models::integrations::openai::{
     AskUserAnswer, AskUserQuestion, AskUserResult, ToolCall, ToolCallResult, ToolCallResultStatus,
 };
 use tokio::sync::mpsc::Sender;
 
-/// Show the ask user popup with the given questions
+/// Get the total number of options for a question (including custom if allowed)
+fn get_total_options(question: &AskUserQuestion) -> usize {
+    if question.allow_custom {
+        question.options.len() + 1
+    } else {
+        question.options.len()
+    }
+}
+
+/// Show the ask user inline block with the given questions
 pub fn handle_show_ask_user_popup(
     state: &mut AppState,
     tool_call: ToolCall,
@@ -21,15 +29,58 @@ pub fn handle_show_ask_user_popup(
     }
 
     state.show_ask_user_popup = true;
-    state.ask_user_questions = questions;
+    state.ask_user_focused = true;
+    state.ask_user_questions = questions.clone();
     state.ask_user_answers.clear();
     state.ask_user_current_tab = 0;
     state.ask_user_selected_option = 0;
     state.ask_user_custom_input.clear();
     state.ask_user_tool_call = Some(tool_call);
 
+    // Create inline message block
+    let msg = crate::services::message::Message::render_ask_user_block(
+        questions,
+        state.ask_user_answers.clone(),
+        state.ask_user_current_tab,
+        state.ask_user_selected_option,
+        state.ask_user_custom_input.clone(),
+        state.ask_user_focused,
+        None,
+    );
+    state.ask_user_message_id = Some(msg.id);
+    state.messages.push(msg);
+
     // Invalidate cache to update display
     crate::services::message::invalidate_message_lines_cache(state);
+
+    // Auto-scroll to bottom to show the new block
+    state.stay_at_bottom = true;
+}
+
+/// Public wrapper for refresh (used by handlers/mod.rs for focus toggle)
+pub fn refresh_ask_user_block_pub(state: &mut AppState) {
+    refresh_ask_user_block(state);
+}
+
+/// Refresh the inline ask_user message block to reflect current state
+fn refresh_ask_user_block(state: &mut AppState) {
+    if let Some(msg_id) = state.ask_user_message_id {
+        // Update the existing message in-place
+        for msg in &mut state.messages {
+            if msg.id == msg_id {
+                msg.content = crate::services::message::MessageContent::RenderAskUserBlock {
+                    questions: state.ask_user_questions.clone(),
+                    answers: state.ask_user_answers.clone(),
+                    current_tab: state.ask_user_current_tab,
+                    selected_option: state.ask_user_selected_option,
+                    custom_input: state.ask_user_custom_input.clone(),
+                    focused: state.ask_user_focused,
+                };
+                break;
+            }
+        }
+        crate::services::message::invalidate_message_lines_cache(state);
+    }
 }
 
 /// Navigate to the next tab (question or Submit)
@@ -43,6 +94,7 @@ pub fn handle_ask_user_next_tab(state: &mut AppState) {
         state.ask_user_current_tab += 1;
         restore_selection_for_current_tab(state);
     }
+    refresh_ask_user_block(state);
 }
 
 /// Navigate to the previous tab
@@ -55,6 +107,7 @@ pub fn handle_ask_user_prev_tab(state: &mut AppState) {
         state.ask_user_current_tab -= 1;
         restore_selection_for_current_tab(state);
     }
+    refresh_ask_user_block(state);
 }
 
 /// Restore the cursor position when navigating back to a question tab.
@@ -104,6 +157,7 @@ pub fn handle_ask_user_next_option(state: &mut AppState) {
     if state.ask_user_selected_option < total_options.saturating_sub(1) {
         state.ask_user_selected_option += 1;
     }
+    refresh_ask_user_block(state);
 }
 
 /// Navigate to the previous option within the current question
@@ -120,6 +174,7 @@ pub fn handle_ask_user_prev_option(state: &mut AppState) {
     if state.ask_user_selected_option > 0 {
         state.ask_user_selected_option -= 1;
     }
+    refresh_ask_user_block(state);
 }
 
 /// Select the current option (or submit if on Submit tab)
@@ -157,6 +212,7 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
                 state.ask_user_custom_input.clear();
             }
         }
+        refresh_ask_user_block(state);
         return;
     }
 
@@ -178,6 +234,7 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
             state.ask_user_custom_input.clear();
         }
     }
+    refresh_ask_user_block(state);
 }
 
 /// Quick select an option by number (1-9)
@@ -206,8 +263,10 @@ pub fn handle_ask_user_quick_select(
         // If it's a regular option (not custom), select it immediately
         if option_idx < current_q.options.len() {
             handle_ask_user_select_option(state, output_tx);
+        } else {
+            // Custom option — just focus it, refresh to show selection
+            refresh_ask_user_block(state);
         }
-        // If it's the custom option, just focus it (user needs to type)
     }
 }
 
@@ -225,6 +284,7 @@ pub fn handle_ask_user_custom_input_changed(state: &mut AppState, c: char) {
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
     if current_q.allow_custom && state.ask_user_selected_option == current_q.options.len() {
         state.ask_user_custom_input.push(c);
+        refresh_ask_user_block(state);
     }
 }
 
@@ -242,6 +302,7 @@ pub fn handle_ask_user_custom_input_backspace(state: &mut AppState) {
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
     if current_q.allow_custom && state.ask_user_selected_option == current_q.options.len() {
         state.ask_user_custom_input.pop();
+        refresh_ask_user_block(state);
     }
 }
 
@@ -259,6 +320,7 @@ pub fn handle_ask_user_custom_input_delete(state: &mut AppState) {
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
     if current_q.allow_custom && state.ask_user_selected_option == current_q.options.len() {
         state.ask_user_custom_input.clear();
+        refresh_ask_user_block(state);
     }
 }
 
@@ -350,9 +412,15 @@ pub fn handle_ask_user_cancel(state: &mut AppState, output_tx: &Sender<OutputEve
     close_ask_user_popup(state);
 }
 
-/// Close the popup and reset state
+/// Close the ask user interaction and remove the inline block
 fn close_ask_user_popup(state: &mut AppState) {
+    // Remove the inline message block
+    if let Some(msg_id) = state.ask_user_message_id.take() {
+        state.messages.retain(|m| m.id != msg_id);
+    }
+
     state.show_ask_user_popup = false;
+    state.ask_user_focused = false;
     state.ask_user_questions.clear();
     state.ask_user_answers.clear();
     state.ask_user_current_tab = 0;
