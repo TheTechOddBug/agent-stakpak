@@ -17,7 +17,7 @@ mod reconciler;
 mod scheduler;
 mod utils;
 
-pub use agent::{SpawnConfig, spawn_agent};
+pub use agent::{AgentServerConnection, SpawnConfig, spawn_agent};
 pub use config::{DeliveryConfig, Schedule, ScheduleConfig};
 pub use db::{ListRunsFilter, RELOAD_SENTINEL, RunStatus, ScheduleDb};
 pub use executor::{CheckResult, run_check_script};

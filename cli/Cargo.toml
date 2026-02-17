@@ -11,6 +11,7 @@ readme = "../README.md"
 [features]
 default = ["bedrock"]
 bedrock = ["stakpak-shared/bedrock", "stakai/bedrock"]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 stakpak-api = { workspace = true }
@@ -67,6 +68,10 @@ thiserror = "2.0"
 libsql = { workspace = true }
 tokio-cron-scheduler = "0.15"
 which = "7.0"
+
+# jemalloc replaces musl's default allocator which aggressively munmap's pages,
+# causing use-after-free SIGSEGV in libsql's sqlite3Close() on Linux musl targets.
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

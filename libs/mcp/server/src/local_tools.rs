@@ -262,11 +262,6 @@ REMOTE EXECUTION:
   * 'user@server.com:2222' with password authentication
   * Remote paths: 'ssh://user@host/path' or 'user@host:/path'
 
-SECRET HANDLING:
-- Output containing secrets will be redacted and shown as placeholders like [REDACTED_SECRET:rule-id:hash]
-- You can use these placeholders in subsequent commands - they will be automatically restored to actual values before execution
-- Example: If you see 'export API_KEY=[REDACTED_SECRET:api-key:abc123]', you can use '[REDACTED_SECRET:api-key:abc123]' in later commands
-
 If the command's output exceeds 300 lines the result will be truncated and the full output will be saved to a file in the current directory"
     )]
     pub async fn run_command(
@@ -343,11 +338,6 @@ RETURNS:
 - status: Current task status (will be 'Running' initially)
 - start_time: When the task was started
 
-SECRET HANDLING:
-- Commands containing secrets will have them restored before execution
-- Task output will be redacted when retrieved
-- Use secret placeholders like [REDACTED_SECRET:rule-id:hash] in commands
-
 Use the get_all_tasks tool to monitor task progress, or the cancel_task tool to cancel a task."
     )]
     pub async fn run_command_task(
@@ -362,11 +352,6 @@ Use the get_all_tasks tool to monitor task progress, or the cancel_task tool to 
             private_key_path,
         }): Parameters<RunCommandRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // Restore secrets in the command before execution
-        let actual_command = self
-            .get_secret_manager()
-            .restore_secrets_in_string(&command);
-
         let timeout_duration = timeout.map(std::time::Duration::from_secs);
 
         // Handle both local and remote async commands using TaskManager
@@ -380,7 +365,7 @@ Use the get_all_tasks tool to monitor task progress, or the cancel_task tool to 
 
             self.get_task_manager()
                 .start_task(
-                    actual_command,
+                    command,
                     description,
                     timeout_duration,
                     Some(remote_connection),
@@ -389,7 +374,7 @@ Use the get_all_tasks tool to monitor task progress, or the cancel_task tool to 
         } else {
             // Local async command (existing logic)
             self.get_task_manager()
-                .start_task(actual_command, description, timeout_duration, None)
+                .start_task(command, description, timeout_duration, None)
                 .await
         };
 
@@ -423,7 +408,7 @@ RETURNS:
   - Status: Current status (Running, Completed, Failed, Cancelled, TimedOut)
   - Start Time: When the task was started
   - Duration: How long the task has been running or took to complete
-  - Output: Command output preview (truncated to 80 chars, redacted for security)
+  - Output: Command output preview (truncated to 80 chars)
 
 This tool provides a clean tabular overview of all background tasks and their current state.
 Use the full Task ID from this output with cancel_task to cancel specific tasks."
@@ -634,7 +619,7 @@ This tool provides comprehensive details about a background task started with ru
 - Current status (Running, Completed, Failed, Cancelled, TimedOut, Pending)
 - Task ID and start time
 - Duration (elapsed time for running tasks, total time for completed tasks)
-- Complete command output with secret redaction
+- Complete command output
 - Error information if the task failed
 
 If the task output exceeds 300 lines the result will be truncated and the full output will be saved to a file in the current directory.
@@ -772,11 +757,6 @@ GLOB (File Filtering):
   * glob='**/*.ts' - All TypeScript files (recursive)
   * glob='test_*.py' - Python test files
 
-SECRET HANDLING:
-- File contents containing secrets will be redacted and shown as placeholders like [REDACTED_SECRET:rule-id:hash]
-- These placeholders represent actual secret values that are safely stored for later use
-- You can reference these placeholders when working with the file content
-
 A maximum of 300 lines will be shown at a time, the rest will be truncated."
     )]
     pub async fn view(
@@ -839,11 +819,6 @@ REMOTE FILE EDITING:
   * 'ssh://user@server.com/var/www/app/config.php' - Edit remote application config
   * '/local/path/file.txt' - Edit local file (default behavior)
 
-SECRET HANDLING:
-- You can use secret placeholders like [REDACTED_SECRET:rule-id:hash] in both old_str and new_str parameters
-- These placeholders will be automatically restored to actual secret values before performing the replacement
-- This allows you to safely work with secret values without exposing them
-
 When replacing code, ensure the new text maintains proper syntax, indentation, and follows the codebase style."
     )]
     pub async fn str_replace(
@@ -896,11 +871,7 @@ REMOTE FILE CREATION:
 - Examples:
   * 'user@server.com:/tmp/script.sh' - Create remote script
   * 'ssh://user@server.com/var/www/new-config.json' - Create remote config
-  * '/local/path/file.txt' - Create local file (default behavior)
-
-SECRET HANDLING:
-- File content containing secrets will have them restored before writing to ensure functionality
-- Use secret placeholders like [REDACTED_SECRET:rule-id:hash] in file_text parameter"
+  * '/local/path/file.txt' - Create local file (default behavior)"
     )]
     pub async fn create(
         &self,
@@ -931,7 +902,7 @@ SECRET HANDLING:
     }
 
     #[tool(
-        description = "Generate a cryptographically secure password with the specified constraints. The generated password will be automatically redacted in the response for security.
+        description = "Generate a cryptographically secure password with the specified constraints.
 
 PARAMETERS:
 - length: The length of the password to generate (default: 15 characters)
@@ -944,8 +915,6 @@ CHARACTER SETS:
 
 SECURITY FEATURES:
 - Uses cryptographically secure random number generation
-- Output is automatically redacted and stored as [REDACTED_SECRET:password:hash]
-- The redacted placeholder can be used in subsequent commands where actual password will be restored
 "
     )]
     pub async fn generate_password(
@@ -959,13 +928,7 @@ SECURITY FEATURES:
 
         let password = stakpak_shared::utils::generate_password(length, no_symbols);
 
-        let redacted_password = self
-            .get_secret_manager()
-            .redact_and_store_password(&password, &password);
-
-        Ok(CallToolResult::success(vec![Content::text(
-            &redacted_password,
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(&password)]))
     }
 
     #[tool(
@@ -1195,8 +1158,6 @@ SAFETY NOTES:
         private_key_path: Option<String>,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<CommandResult, CallToolResult> {
-        let actual_command = self.get_secret_manager().restore_secrets_in_string(command);
-
         if let Some(remote_str) = &remote {
             // Remote execution
             let connection_info = RemoteConnectionInfo {
@@ -1219,7 +1180,7 @@ SAFETY NOTES:
 
             let timeout_duration = timeout.map(std::time::Duration::from_secs);
             let (output, exit_code) = connection
-                .execute_command(&actual_command, timeout_duration, Some(ctx))
+                .execute_command(command, timeout_duration, Some(ctx))
                 .await
                 .map_err(|e| {
                     error!("Failed to execute remote command: {}", e);
@@ -1240,8 +1201,7 @@ SAFETY NOTES:
             })
         } else {
             // Local execution - existing logic
-            self.execute_local_command(&actual_command, timeout, ctx)
-                .await
+            self.execute_local_command(command, timeout, ctx).await
         }
     }
 
@@ -2387,10 +2347,7 @@ SAFETY NOTES:
         new_str: &str,
         replace_all: Option<bool>,
     ) -> Result<CallToolResult, McpError> {
-        let actual_old_str = self.get_secret_manager().restore_secrets_in_string(old_str);
-        let actual_new_str = self.get_secret_manager().restore_secrets_in_string(new_str);
-
-        if actual_old_str == actual_new_str {
+        if old_str == new_str {
             return Ok(CallToolResult::error(vec![
                 Content::text("OLD_STR_NEW_STR_IDENTICAL"),
                 Content::text(
@@ -2410,7 +2367,7 @@ SAFETY NOTES:
             }
         };
 
-        if !content.contains(&actual_old_str) {
+        if !content.contains(old_str) {
             return Ok(CallToolResult::error(vec![
                 Content::text("STRING_NOT_FOUND"),
                 Content::text("The string old_str was not found in the file"),
@@ -2418,14 +2375,14 @@ SAFETY NOTES:
         }
 
         let new_content = if replace_all.unwrap_or(false) {
-            content.replace(&actual_old_str, &actual_new_str)
+            content.replace(old_str, new_str)
         } else {
-            content.replacen(&actual_old_str, &actual_new_str, 1)
+            content.replacen(old_str, new_str, 1)
         };
 
         let replaced_count = if replace_all.unwrap_or(false) {
-            content.matches(&actual_old_str).count()
-        } else if content.contains(&actual_old_str) {
+            content.matches(old_str).count()
+        } else if content.contains(old_str) {
             1
         } else {
             0
@@ -2458,10 +2415,7 @@ SAFETY NOTES:
         new_str: &str,
         replace_all: Option<bool>,
     ) -> Result<CallToolResult, McpError> {
-        let actual_old_str = self.get_secret_manager().restore_secrets_in_string(old_str);
-        let actual_new_str = self.get_secret_manager().restore_secrets_in_string(new_str);
-
-        if actual_old_str == actual_new_str {
+        if old_str == new_str {
             return Ok(CallToolResult::error(vec![
                 Content::text("OLD_STR_NEW_STR_IDENTICAL"),
                 Content::text(
@@ -2485,18 +2439,18 @@ SAFETY NOTES:
         // LLMs commonly normalize curly quotes to straight quotes, en-dashes to
         // hyphens, etc. The fallback finds the original substring in the file by
         // normalizing both sides to ASCII and using char-position mapping.
-        let (new_content, replaced_count) = if original_content.contains(&actual_old_str) {
+        let (new_content, replaced_count) = if original_content.contains(old_str) {
             // Exact match — fast path.  Use `replacen` for single or
             // `replace` for all, and derive the count from the result to
             // avoid scanning the string twice.
             if replace_all.unwrap_or(false) {
-                let result = original_content.replace(&actual_old_str, &actual_new_str);
+                let result = original_content.replace(old_str, new_str);
                 // Derive count from the length difference.
-                let old_len = actual_old_str.len();
-                let new_len = actual_new_str.len();
+                let old_len = old_str.len();
+                let new_len = new_str.len();
                 let count = if old_len == new_len {
                     // Length-neutral replacement — count via matches (unavoidable).
-                    original_content.matches(&actual_old_str).count()
+                    original_content.matches(old_str).count()
                 } else {
                     let orig = original_content.len();
                     let after = result.len();
@@ -2507,15 +2461,12 @@ SAFETY NOTES:
                 };
                 (result, count)
             } else {
-                (
-                    original_content.replacen(&actual_old_str, &actual_new_str, 1),
-                    1,
-                )
+                (original_content.replacen(old_str, new_str, 1), 1)
             }
         } else if let Some(result) = unicode_normalized_replace(
             &original_content,
-            &actual_old_str,
-            &actual_new_str,
+            old_str,
+            new_str,
             replace_all.unwrap_or(false),
         ) {
             // Unicode-normalized fallback matched
@@ -2581,16 +2532,8 @@ SAFETY NOTES:
             }
         }
 
-        // Restore secrets in the file content before writing
-        let actual_file_text = self
-            .get_secret_manager()
-            .restore_secrets_in_string(file_text);
-
         // Create the file using the correct SFTP method
-        if let Err(e) = conn
-            .create_file(remote_path, actual_file_text.as_bytes())
-            .await
-        {
+        if let Err(e) = conn.create_file(remote_path, file_text.as_bytes()).await {
             error!("Failed to create remote file '{}': {}", remote_path, e);
             return Ok(CallToolResult::error(vec![
                 Content::text("CREATE_ERROR"),
@@ -2601,7 +2544,7 @@ SAFETY NOTES:
             ]));
         }
 
-        let lines = actual_file_text.lines().count();
+        let lines = file_text.lines().count();
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Successfully created remote file {} with {} lines",
             original_path, lines
@@ -2630,12 +2573,7 @@ SAFETY NOTES:
             ]));
         }
 
-        // Restore secrets in the file content before writing
-        let actual_file_text = self
-            .get_secret_manager()
-            .restore_secrets_in_string(file_text);
-
-        match fs::write(path, actual_file_text) {
+        match fs::write(path, file_text) {
             Ok(_) => {
                 let lines = fs::read_to_string(path)
                     .map(|content| content.lines().count())

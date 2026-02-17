@@ -13,8 +13,8 @@ use crate::commands::watch::reconciler::{
     RegisteredSchedule, ScheduleSnapshot, reconcile_schedules,
 };
 use crate::commands::watch::{
-    RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig, assemble_prompt,
-    is_process_running, run_check_script, spawn_agent,
+    AgentServerConnection, RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig,
+    assemble_prompt, is_process_running, run_check_script, spawn_agent,
 };
 use chrono::{DateTime, Utc};
 use croner::Cron;
@@ -34,7 +34,8 @@ const HEARTBEAT_UPDATE_INTERVAL_SECONDS: u64 = 30;
 /// Run the autopilot service in foreground mode.
 ///
 /// This function blocks until the autopilot service receives a shutdown signal (SIGTERM/SIGINT).
-pub async fn run_scheduler() -> Result<(), String> {
+/// Scheduled agents run via the co-hosted agent server API.
+pub async fn run_scheduler(server: AgentServerConnection) -> Result<(), String> {
     print_banner();
 
     // Load and validate configuration
@@ -175,6 +176,7 @@ pub async fn run_scheduler() -> Result<(), String> {
     let schedule_snapshot = Arc::new(Mutex::new(ScheduleSnapshot { registered }));
 
     let db = Arc::new(db);
+    let server = Arc::new(server);
 
     let config_path = crate::commands::watch::config::expand_tilde(
         crate::commands::watch::config::STAKPAK_AUTOPILOT_CONFIG_PATH,
@@ -209,6 +211,7 @@ pub async fn run_scheduler() -> Result<(), String> {
     let scheduler_clone2 = Arc::clone(&scheduler);
     let snapshot_clone2 = Arc::clone(&schedule_snapshot);
     let config_path_clone = config_path.clone();
+    let server_clone2 = Arc::clone(&server);
     let pending_poller = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut last_mtime = initial_config_mtime;
@@ -245,12 +248,13 @@ pub async fn run_scheduler() -> Result<(), String> {
 
                             let db = Arc::clone(&db_clone2);
                             let config = config_for_event;
+                            let server = Arc::clone(&server_clone2);
 
                             tokio::spawn(async move {
                                 info!(schedule = %schedule.name, "Manual schedule fired");
                                 print_event("fire", &schedule.name, "Manual schedule fired");
                                 if let Err(e) =
-                                    handle_schedule_event(&db, config.as_ref(), &schedule).await
+                                    handle_schedule_event(&db, config.as_ref(), &schedule, &server).await
                                 {
                                     error!(
                                         schedule = %schedule.name,
@@ -325,8 +329,9 @@ pub async fn run_scheduler() -> Result<(), String> {
                             let cfg = config_state.read().await;
                             Arc::clone(&cfg)
                         };
+                        let server = Arc::clone(&server);
                         tokio::spawn(async move {
-                            if let Err(e) = handle_schedule_event(&db, config.as_ref(), &event.schedule).await {
+                            if let Err(e) = handle_schedule_event(&db, config.as_ref(), &event.schedule, &server).await {
                                 error!(schedule = %event.schedule.name, error = %e, "Failed to handle schedule event");
                             }
                         });
@@ -496,6 +501,7 @@ async fn handle_schedule_event(
     db: &ScheduleDb,
     config: &ScheduleConfig,
     schedule: &crate::commands::watch::Schedule,
+    server: &AgentServerConnection,
 ) -> Result<(), String> {
     // Singleton guard: skip if this schedule already has a running run
     match db.has_running_run(&schedule.name).await {
@@ -644,6 +650,7 @@ async fn handle_schedule_event(
         enable_slack_tools: schedule.effective_enable_slack_tools(&config.defaults),
         enable_subagents: schedule.effective_enable_subagents(&config.defaults),
         pause_on_approval: schedule.effective_pause_on_approval(&config.defaults),
+        server: server.clone(),
     };
 
     match spawn_agent(spawn_config).await {
