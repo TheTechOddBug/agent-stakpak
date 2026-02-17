@@ -165,8 +165,7 @@ pub async fn run_scheduler(server: AgentServerConnection) -> Result<(), String> 
 
             // Handle each schedule event in a separate task
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_schedule_event(&db, &config, &event.schedule, &server).await
+                if let Err(e) = handle_schedule_event(&db, &config, &event.schedule, &server).await
                 {
                     error!(
                         schedule = %event.schedule.name,

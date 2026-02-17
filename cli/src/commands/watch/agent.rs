@@ -184,11 +184,13 @@ async fn run_server_session(
                     proposed
                         .tool_calls
                         .iter()
-                        .map(|tc| stakpak_shared::models::async_manifest::PendingToolCall {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                        })
+                        .map(
+                            |tc| stakpak_shared::models::async_manifest::PendingToolCall {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            },
+                        )
                         .collect();
                 pause_reason = Some(PauseReason::ToolApprovalRequired {
                     pending_tool_calls: pending,
@@ -239,7 +241,11 @@ async fn run_server_session(
     );
 
     Ok(AgentResult {
-        exit_code: if paused { Some(EXIT_CODE_PAUSED) } else { Some(0) },
+        exit_code: if paused {
+            Some(EXIT_CODE_PAUSED)
+        } else {
+            Some(0)
+        },
         session_id: Some(session_id),
         checkpoint_id: None,
         timed_out: false,
