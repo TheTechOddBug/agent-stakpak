@@ -12,8 +12,8 @@ use stakpak_shared::local_store::LocalStore;
 use tracing::error;
 use uuid::Uuid;
 
-/// Container path for mounted host config files (when config is outside default).
-const CONTAINER_HOST_CONFIG_MOUNT: &str = "/agent/host-stakpak-config";
+/// Default config path inside container (matches ~/.stakpak/config.toml convention).
+const CONTAINER_CONFIG_PATH: &str = "/agent/.stakpak/config.toml";
 
 /// Request for creating a dynamic subagent with full control over its configuration.
 /// Based on the AOrchestra 4-tuple model: (Instruction, Context, Tools, Model)
@@ -509,33 +509,27 @@ NOTES:
             let warden_prompt_path = format!("/tmp/{}", prompt_filename);
             warden_command.push_str(&format!(" -v {}:{}", prompt_file_path, warden_prompt_path));
 
-            // When a config path was passed, the host path is not visible inside the container.
-            // Mount the config file's parent dir so the subagent can read the same config.
-            let config_mount = config_path.and_then(|p| {
-                let path = Path::new(p);
-                let parent = path.parent()?;
-                let filename = path.file_name()?.to_string_lossy().into_owned();
-                if parent.exists() {
-                    Some((parent.to_path_buf(), filename))
-                } else {
-                    None
-                }
-            });
-            if let Some((ref parent, ref _filename)) = config_mount {
-                warden_command.push_str(&format!(
-                    " -v {}:{}:ro",
-                    parent.display(),
-                    CONTAINER_HOST_CONFIG_MOUNT
-                ));
-            }
-            let container_config_path = config_mount
-                .map(|(_parent, filename)| format!("{}/{}", CONTAINER_HOST_CONFIG_MOUNT, filename));
-
             // Add default sandbox volumes for read-only access
             // Working directory (read-only)
             warden_command.push_str(" -v ./:/agent:ro");
             // Session data directory (read-write for subagent state)
             warden_command.push_str(" -v ./.stakpak:/agent/.stakpak");
+
+            // When a config path was passed, overlay it at the default location (~/.stakpak/config.toml → /agent/.stakpak/config.toml).
+            // Must come after ./.stakpak mount so the file overlays on top.
+            let container_config_path = config_path.and_then(|p| {
+                let path = Path::new(p);
+                if path.exists() && path.is_file() {
+                    warden_command.push_str(&format!(
+                        " -v {}:{}:ro",
+                        path.display(),
+                        CONTAINER_CONFIG_PATH
+                    ));
+                    Some(CONTAINER_CONFIG_PATH.to_string())
+                } else {
+                    None
+                }
+            });
 
             // Cloud credentials (read-only) - only mount if they exist
             let cloud_volumes = [
