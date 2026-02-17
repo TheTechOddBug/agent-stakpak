@@ -89,6 +89,16 @@ jobs:
         if: endsWith(matrix.target, 'linux-musl') && !matrix.docker
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - name: Docker cargo cache
+        if: matrix.docker
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo-docker/registry
+            ~/.cargo-docker/git
+          key: docker-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: docker-cargo-${{ matrix.target }}-
+
       # Alpine Linux is musl-native — GCC has full C11 atomics support
       # without the broken musl-gcc wrapper that Ubuntu's musl-tools uses.
       # This is the same approach Turso uses for libsql aarch64-musl builds.
@@ -101,6 +111,8 @@ jobs:
             --user 0:0
             -v ${{ github.workspace }}:/build
             -w /build
+            -v /home/runner/.cargo-docker/registry:/usr/local/cargo/registry
+            -v /home/runner/.cargo-docker/git:/usr/local/cargo/git
           run: |
             apk add --no-cache gcc musl-dev
             cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
