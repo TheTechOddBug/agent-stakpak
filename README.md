@@ -41,7 +41,7 @@ An open source agent that lives on your machines 24/7, keeps your apps running, 
 ### Try Stakpak Now
 ```bash
 curl -sSL https://stakpak.dev/install.sh | sh #Install Stakpak
-stakpak init #It lets stakpak explore your infrastructure
+stakpak init #It helps Stakpak understand your apps and tech stack.
 stakpak autopilot up #Its starts an autonomous agent. Running 24/7 in the background.
 ```
 [For more installation options...](https://github.com/stakpak/agent#installation)
