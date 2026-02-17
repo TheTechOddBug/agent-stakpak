@@ -21,7 +21,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact_name: stakpak-linux-aarch64
             features: --features jemalloc
-            cc: clang
 
     runs-on: ${{ matrix.os }}
 
@@ -42,10 +41,14 @@ jobs:
         if: endsWith(matrix.target, 'linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # musl-gcc uses -nostdinc which hides GCC's own <stdatomic.h>.
+      # jemalloc's configure needs it for C11 atomics detection.
+      - name: Expose C11 atomics header for musl-gcc
+        if: endsWith(matrix.target, 'linux-musl')
+        run: echo "C_INCLUDE_PATH=$(dirname $(find /usr/lib/gcc -name stdatomic.h | head -1))" >> $GITHUB_ENV
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
-        env:
-          CC: ${{ matrix.cc || '' }}
 
       - name: Run tests
         run: cargo test --target ${{ matrix.target }}
