@@ -253,6 +253,23 @@ pub struct AppState {
         HashMap<String, stakpak_shared::models::integrations::openai::TaskPauseInfo>,
     /// Buffered user messages waiting to be sent after streaming completes
     pub pending_user_messages: VecDeque<PendingUserMessage>,
+
+    // ========== Ask User Popup State ==========
+    /// Whether the ask user popup is visible
+    pub show_ask_user_popup: bool,
+    /// Questions to display in the popup
+    pub ask_user_questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+    /// User's answers (question_id -> answer)
+    pub ask_user_answers:
+        HashMap<String, stakpak_shared::models::integrations::openai::AskUserAnswer>,
+    /// Currently selected tab index (question index, or questions.len() for Submit)
+    pub ask_user_current_tab: usize,
+    /// Currently selected option index within the current question
+    pub ask_user_selected_option: usize,
+    /// Custom input text when "Type something..." is selected
+    pub ask_user_custom_input: String,
+    /// The tool call that triggered this popup (for sending result back)
+    pub ask_user_tool_call: Option<ToolCall>,
 }
 
 pub struct AppStateOptions<'a> {
@@ -513,6 +530,15 @@ impl AppState {
             auth_display_info,
             subagent_pause_info: HashMap::new(),
             init_prompt_content,
+
+            // Ask User popup initialization
+            show_ask_user_popup: false,
+            ask_user_questions: Vec::new(),
+            ask_user_answers: HashMap::new(),
+            ask_user_current_tab: 0,
+            ask_user_selected_option: 0,
+            ask_user_custom_input: String::new(),
+            ask_user_tool_call: None,
         }
     }
 
