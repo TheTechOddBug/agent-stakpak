@@ -2,6 +2,7 @@
 //!
 //! Handles loading and validating `autopilot.toml` configuration files.
 
+use super::db::RELOAD_SENTINEL;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -166,6 +167,10 @@ fn default_pause_on_approval() -> bool {
     false // Default to auto-approve, matching async mode default
 }
 
+fn default_schedule_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationConfig {
     pub gateway_url: String,
@@ -282,6 +287,10 @@ pub struct Schedule {
 
     /// Notification chat target override.
     pub notify_chat_id: Option<String>,
+
+    /// Whether this schedule is active.
+    #[serde(default = "default_schedule_enabled")]
+    pub enabled: bool,
 }
 
 impl Schedule {
@@ -395,6 +404,9 @@ pub enum ConfigError {
     #[error("Duplicate schedule name: '{0}'")]
     DuplicateScheduleName(String),
 
+    #[error("Schedule name '{0}' is reserved")]
+    ReservedScheduleName(String),
+
     #[error("Check script not found for schedule '{schedule}': {path}")]
     CheckScriptNotFound { schedule: String, path: String },
 
@@ -427,6 +439,7 @@ impl ScheduleConfig {
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_unique_schedule_names()?;
+        self.validate_reserved_schedule_names()?;
         self.validate_cron_expressions()?;
         self.validate_check_scripts()?;
         Ok(())
@@ -438,6 +451,16 @@ impl ScheduleConfig {
         for schedule in &self.schedules {
             if !seen.insert(&schedule.name) {
                 return Err(ConfigError::DuplicateScheduleName(schedule.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ensure no reserved schedule names are used.
+    fn validate_reserved_schedule_names(&self) -> Result<(), ConfigError> {
+        for schedule in &self.schedules {
+            if schedule.name.trim() == RELOAD_SENTINEL {
+                return Err(ConfigError::ReservedScheduleName(schedule.name.clone()));
             }
         }
         Ok(())
@@ -618,6 +641,25 @@ prompt = "Second"
         assert!(matches!(err, ConfigError::DuplicateScheduleName(_)));
         if let ConfigError::DuplicateScheduleName(name) = err {
             assert_eq!(name, "duplicate");
+        }
+    }
+
+    #[test]
+    fn test_reserved_schedule_name_rejected() {
+        let config_str = r#"
+[[schedules]]
+name = "__config_reload__"
+cron = "0 * * * *"
+prompt = "Reserved"
+"#;
+
+        let result = ScheduleConfig::parse(config_str);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::ReservedScheduleName(_)));
+        if let ConfigError::ReservedScheduleName(name) = err {
+            assert_eq!(name, "__config_reload__");
         }
     }
 

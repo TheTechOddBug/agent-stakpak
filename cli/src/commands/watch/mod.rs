@@ -13,12 +13,13 @@ pub mod config;
 mod db;
 mod executor;
 mod prompt;
+mod reconciler;
 mod scheduler;
 mod utils;
 
 pub use agent::{AgentServerConnection, SpawnConfig, spawn_agent};
 pub use config::{DeliveryConfig, Schedule, ScheduleConfig};
-pub use db::{ListRunsFilter, RunStatus, ScheduleDb};
+pub use db::{ListRunsFilter, RELOAD_SENTINEL, RunStatus, ScheduleDb};
 pub use executor::{CheckResult, run_check_script};
 pub use prompt::assemble_prompt;
 pub use scheduler::Scheduler;
