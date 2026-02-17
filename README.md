@@ -40,9 +40,9 @@ An open source agent that lives on your machines 24/7, keeps your apps running, 
 
 ### Try Stakpak Now
 ```bash
-curl -sSL https://stakpak.dev/install.sh | sh
-stakpak init
-stakpak autopilot up
+curl -sSL https://stakpak.dev/install.sh | sh #Install Stakpak
+stakpak init #It lets stakpak explore your infrastructure
+stakpak autopilot up #Its starts an autonomous agent. Running 24/7 in the background.
 ```
 [For more installation options...](https://github.com/stakpak/agent#installation)
 
@@ -59,7 +59,7 @@ Generate infrastructure code, debug Kubernetes, configure CI/CD, automate deploy
 Use the new lifecycle aliases for one-command setup/start/stop:
 
 ```bash
-stakpak onboard   # alias for: stakpak autopilot init
+stakpak onboard   # alias for: stakpak init
 stakpak up        # alias for: stakpak autopilot up
 stakpak down      # alias for: stakpak autopilot down
 ```
