@@ -23,7 +23,7 @@ Before starting discovery, check if `APPS.md` already exists in the current dire
 **If APPS.md exists:**
 - Read it and parse the existing knowledge
 - Use it as a baseline — skip re-discovering things already documented with high confidence
-- Focus discovery on: sections marked with `[?]`, sections marked with `[!]`, anything that looks stale (check "Last updated" date), and any new signals in the environment not yet captured
+- Focus discovery on: sections marked with `[unconfirmed]`, `[issue]`, `[unreachable]`, or `[removed]`, anything that looks stale (check "Last updated" date), and any new signals in the environment not yet captured
 - After discovery, present changes grouped as: **Added** (new apps/services), **Changed** (updated configs, versions, replicas), **Removed** (no longer found — confirm with user before removing, since a missing signal may mean discovery failed, not that the service is gone)
 - Ask the user to confirm before updating the file
 
@@ -84,7 +84,7 @@ This is the most important discovery domain. The goal is to find and deeply unde
 
 **Per-app analysis:**
 - **Entry point**: find what starts the app (server, CLI, worker, scheduled job, serverless handler). Read it to understand: port, framework, middleware
-- **Dependencies**: databases, caches, queues, object storage, external APIs, internal service calls. Grep for connection string patterns, ORM configs, SDK initializations, env var references
+- **Dependencies**: databases, caches, queues, object storage, external APIs, internal service calls. Grep for connection string patterns, ORM configs, SDK initializations, env var references. **Don't stop at the connection string** — trace each dependency to its actual deployment: if you find a database host/IP, determine *where* it runs (RDS instance? EC2-hosted? ECS service? managed cloud service?). Use cloud CLI tools, IaC definitions, DNS lookups, or running service enumeration to resolve IPs/hostnames to concrete infrastructure. An IP address alone is not a complete finding.
 - **Build**: Dockerfiles, compose files, build scripts (`Makefile`, `justfile`, npm scripts). Note base images, build steps, output artifacts
 - **Health**: health/readiness endpoints, K8s probe configs, Docker HEALTHCHECK, graceful shutdown handlers
 - Catalog every environment variable each app requires — this is critical for deployment
@@ -201,7 +201,7 @@ Use this mapping to create your subagents. Launch them all in a **single paralle
 | Secrets & Config | Domain 6: Vault, SOPS, SSM, env var patterns, config injection | `view` | No (file reads only) |
 | Observability | Domain 7: Monitoring, logging, alerting, error tracking configs per app | `view` | No (file reads only) |
 
-**Notes:** Skip cloud-specific subagents if that provider wasn't detected. This mapping is a starting point — combine or split as needed. Cross-reference Domain 1 (source code) against Domain 2 (live state) — discrepancies are high-value findings, flag them with `[!]`.
+**Notes:** Skip cloud-specific subagents if that provider wasn't detected. This mapping is a starting point — combine or split as needed. Cross-reference Domain 1 (source code) against Domain 2 (live state) — discrepancies are high-value findings, flag them with `[issue]`.
 
 ### Subagent Instructions Template
 
@@ -291,6 +291,8 @@ Use this structure:
 > Last updated: {date}
 >
 > This is a living document. The agent updates it as apps change.
+>
+> **Markers:** `[unconfirmed]` = needs investigation · `[issue]` = known issue or stale info · `[unreachable]` = previously found but no longer reachable · `[removed]` = no longer detected
 
 ## Applications
 
@@ -337,8 +339,8 @@ Use this structure:
 
 #### Known Issues & Notes
 
-- [!] Connection pool exhaustion under load
-- [?] Auth service failure mode undocumented
+- [issue] Connection pool exhaustion under load
+- [unconfirmed] Auth service failure mode undocumented
 
 ---
 
@@ -348,7 +350,7 @@ Use this structure:
 
 ## Backing Services
 
-Shared infrastructure that apps depend on. Cross-referenced from app dependency tables.
+Shared infrastructure that apps depend on. Cross-referenced from app dependency tables. **Every backing service must have a confirmed deployment location** — don't just record an IP or hostname. Trace it to the actual compute (e.g., "RDS instance `prod-db` in us-east-1", "self-hosted on EC2 `i-0abc123`", "ECS service `temporal`"). If you can't confirm it, mark with `[unconfirmed]` and explain what you tried.
 
 | Name | Type | Provider | Region | Used By | Managed By |
 |------|------|----------|--------|---------|------------|
@@ -373,7 +375,7 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 ## Infrastructure as Code
 
 - **Tool**: Terraform v1.6 — **Backend**: S3 — **Manages**: VPC, EKS, RDS, SQS, Route53
-- **Not managed**: [!] CloudFront distribution (created manually)
+- **Not managed**: [issue] CloudFront distribution (created manually)
 
 ## Secrets Management
 
@@ -382,7 +384,7 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 
 ## Notes & Gaps
 
-- `[?]` = needs investigation — `[!]` = outdated, inferred, or known issue
+- `[unconfirmed]` = needs investigation — `[issue]` = known issue or stale info
 - Run `stakpak init` to refresh
 
 ---
@@ -393,8 +395,8 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 **APPS.md guidelines:**
 - **App sections are the core** — every app gets its own `###` block with dependencies, env vars, runtime, pipeline, and observability
 - Use tables for structured data, bullet lists for everything else
-- Mark unconfirmed items with `[?]`
-- Mark potential issues or stale info with `[!]`
+- Mark unconfirmed items with `[unconfirmed]`
+- Mark potential issues or stale info with `[issue]`
 - Never include secrets, tokens, passwords, or private key material
 - Keep it scannable — a senior engineer should be able to understand the full application landscape in 2 minutes
 - Omit sections entirely if nothing was discovered for that domain (don't leave empty placeholders)
@@ -454,7 +456,7 @@ Pick from these templates based on what's relevant. **Stagger cron minutes** —
 | `cert-expiry` | `40 9 * * *` | `checks/cert-expiry.sh` — check days until expiry | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
 | `image-freshness` | `45 10 * * 1` | *(none — always run)* | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
 | `runbook-sync` | `50 11 * * 1` | *(none — always run)* | Update operational runbooks based on recent changes | If CI/CD pipelines were discovered |
-| `gaps-investigation` | `55 10 * * 1` | *(none — always run)* | Investigate items marked [?] in APPS.md | If gaps were marked in APPS.md |
+| `apps-refresh` | `0 9 * * 1` | *(none — always run)* | Re-run discovery and update APPS.md — add new services, update changed configs, and mark anything no longer found as `[unreachable]` or `[removed]` (never delete entries, let the user review) | Always — APPS.md is the agent's core knowledge base |
 
 These are examples, **not an exhaustive list**. Use your judgment to create additional schedules tailored to the specific environment — e.g., custom app-specific checks, compliance scans, or anything else the discovered infrastructure warrants.
 
