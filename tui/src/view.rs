@@ -89,8 +89,8 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
 
     // Hide input when shell popup is expanded (takes over input) or when approval bar is visible
     let ask_user_visible = state.show_ask_user_popup && !state.ask_user_questions.is_empty();
-    let input_visible = !(approval_bar_visible
-        || state.shell_popup_visible && state.shell_popup_expanded);
+    let input_visible =
+        !(approval_bar_visible || state.shell_popup_visible && state.shell_popup_expanded);
     let effective_input_height = if input_visible { input_height } else { 0 };
     let queue_count = state.pending_user_messages.len();
     let queue_preview_height = if input_visible && queue_count > 0 {

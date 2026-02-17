@@ -90,7 +90,10 @@ pub enum MessageContent {
     /// Ask user inline block - renders questions and options inline in the message area
     RenderAskUserBlock {
         questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
-        answers: std::collections::HashMap<String, stakpak_shared::models::integrations::openai::AskUserAnswer>,
+        answers: std::collections::HashMap<
+            String,
+            stakpak_shared::models::integrations::openai::AskUserAnswer,
+        >,
         current_tab: usize,
         selected_option: usize,
         custom_input: String,
@@ -268,7 +271,14 @@ pub fn hash_message_content(content: &MessageContent) -> u64 {
                 info.args_tokens.hash(&mut hasher);
             }
         }
-        MessageContent::RenderAskUserBlock { questions, answers, current_tab, selected_option, custom_input, focused } => {
+        MessageContent::RenderAskUserBlock {
+            questions,
+            answers,
+            current_tab,
+            selected_option,
+            custom_input,
+            focused,
+        } => {
             22u8.hash(&mut hasher);
             questions.len().hash(&mut hasher);
             current_tab.hash(&mut hasher);
@@ -592,7 +602,10 @@ impl Message {
 
     pub fn render_ask_user_block(
         questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
-        answers: std::collections::HashMap<String, stakpak_shared::models::integrations::openai::AskUserAnswer>,
+        answers: std::collections::HashMap<
+            String,
+            stakpak_shared::models::integrations::openai::AskUserAnswer,
+        >,
         current_tab: usize,
         selected_option: usize,
         custom_input: String,
@@ -1559,7 +1572,14 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
             let borrowed = get_wrapped_styled_block_lines(&rendered, width);
             lines.extend(convert_to_owned_lines(borrowed));
         }
-        MessageContent::RenderAskUserBlock { questions, answers, current_tab, selected_option, custom_input, focused } => {
+        MessageContent::RenderAskUserBlock {
+            questions,
+            answers,
+            current_tab,
+            selected_option,
+            custom_input,
+            focused,
+        } => {
             let rendered = crate::services::bash_block::render_ask_user_block(
                 questions,
                 answers,
@@ -2226,7 +2246,14 @@ fn get_wrapped_message_lines_internal(
                 let owned_lines = convert_to_owned_lines(borrowed_lines);
                 all_lines.extend(owned_lines);
             }
-            MessageContent::RenderAskUserBlock { questions, answers, current_tab, selected_option, custom_input, focused } => {
+            MessageContent::RenderAskUserBlock {
+                questions,
+                answers,
+                current_tab,
+                selected_option,
+                custom_input,
+                focused,
+            } => {
                 let rendered_lines = crate::services::bash_block::render_ask_user_block(
                     questions,
                     answers,
