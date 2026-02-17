@@ -1,0 +1,51 @@
+name: Build Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, beta]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact_name: stakpak-linux-aarch64
+            features: --features jemalloc
+            cc: clang
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Install MUSL tools
+        if: endsWith(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        env:
+          CC: ${{ matrix.cc || '' }}
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
