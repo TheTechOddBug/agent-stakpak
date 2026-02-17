@@ -150,9 +150,11 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
     let message_area_width = padded_message_area.width as usize;
     let message_area_height = message_area.height as usize;
 
-    // Store message area offsets for click/selection coordinate mapping
+    // Store message area geometry for click/selection coordinate mapping
+    // These values are used by event handlers to convert mouse coordinates to line indices
     state.message_area_y = message_area.y;
     state.message_area_x = padded_message_area.x;
+    state.message_area_height = message_area.height;
 
     render_messages(
         f,
@@ -445,7 +447,11 @@ fn render_messages(f: &mut Frame, state: &mut AppState, area: Rect, width: usize
         visible_lines
     };
 
-    let message_widget = Paragraph::new(visible_lines).wrap(ratatui::widgets::Wrap { trim: false });
+    // NOTE: Don't use Paragraph::wrap() here - lines are already pre-wrapped to the correct width
+    // in get_wrapped_message_lines_cached(). Using wrap() would cause ratatui to potentially
+    // re-wrap lines, creating a mismatch between the cached line count and rendered line count,
+    // which breaks text selection coordinate mapping.
+    let message_widget = Paragraph::new(visible_lines);
     f.render_widget(message_widget, area);
 }
 
@@ -539,7 +545,8 @@ fn render_collapsed_messages_content(f: &mut Frame, state: &mut AppState, area: 
         }
     }
 
-    let message_widget = Paragraph::new(visible_lines).wrap(ratatui::widgets::Wrap { trim: false });
+    // NOTE: Don't use Paragraph::wrap() - lines are already pre-wrapped
+    let message_widget = Paragraph::new(visible_lines);
     f.render_widget(message_widget, area);
 }
 

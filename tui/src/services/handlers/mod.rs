@@ -1021,14 +1021,14 @@ pub fn update(
             } else {
                 // Try side panel click first, then start text selection if in message area
                 popup::handle_side_panel_mouse_click(state, col, row);
-                text_selection::handle_drag_start(state, col, row, message_area_height);
+                text_selection::handle_drag_start(state, col, row);
             }
         }
         InputEvent::MouseDrag(col, row) => {
-            text_selection::handle_drag(state, col, row, message_area_height);
+            text_selection::handle_drag(state, col, row);
         }
         InputEvent::MouseDragEnd(col, row) => {
-            text_selection::handle_drag_end(state, col, row, message_area_height);
+            text_selection::handle_drag_end(state, col, row);
         }
         InputEvent::MouseMove(_col, row) => {
             // Track hover row for visual debugging

@@ -33,7 +33,10 @@ fn content_col(state: &AppState, terminal_col: u16) -> u16 {
 }
 
 /// Handle mouse drag start - begins text selection in message area or input area
-pub fn handle_drag_start(state: &mut AppState, col: u16, row: u16, message_area_height: usize) {
+pub fn handle_drag_start(state: &mut AppState, col: u16, row: u16) {
+    // Use the accurate message_area_height from the last render
+    let message_area_height = state.message_area_height as usize;
+
     // First check if click is in input area
     if is_in_input_area(state, col, row) {
         // Click was in input area - start input selection
@@ -89,7 +92,10 @@ pub fn handle_drag_start(state: &mut AppState, col: u16, row: u16, message_area_
 }
 
 /// Handle mouse drag - updates selection in message area or input area
-pub fn handle_drag(state: &mut AppState, col: u16, row: u16, message_area_height: usize) {
+pub fn handle_drag(state: &mut AppState, col: u16, row: u16) {
+    // Use the accurate message_area_height from the last render
+    let message_area_height = state.message_area_height as usize;
+
     // Check if we're dragging in input area selection mode
     if state.text_area.selection.is_active() {
         if let Some(input_area) = state.input_content_area {
@@ -132,7 +138,7 @@ pub fn handle_drag(state: &mut AppState, col: u16, row: u16, message_area_height
 
 /// Handle mouse drag end - extracts text, copies to clipboard, shows toast
 /// Also detects clicks on user messages to show action popup
-pub fn handle_drag_end(state: &mut AppState, col: u16, row: u16, message_area_height: usize) {
+pub fn handle_drag_end(state: &mut AppState, col: u16, row: u16) {
     // Check if we're ending an input area selection
     if state.text_area.selection.is_active() {
         if let Some(selected_text) = state.text_area.end_selection()
@@ -158,7 +164,7 @@ pub fn handle_drag_end(state: &mut AppState, col: u16, row: u16, message_area_he
     }
 
     // Update final position
-    handle_drag(state, col, row, message_area_height);
+    handle_drag(state, col, row);
 
     // Check if this was just a click (no actual drag)
     let is_just_click = match (
