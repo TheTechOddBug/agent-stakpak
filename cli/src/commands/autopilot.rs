@@ -1315,7 +1315,7 @@ async fn stop_autopilot() -> Result<(), String> {
                     .db_path()
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
-                    .join("watch.pid");
+                    .join("autopilot.pid");
                 let _ = std::fs::remove_file(&pid_file);
             }
         }
@@ -1420,28 +1420,36 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
             };
             add_schedule_in_config(&mut config, schedule)?;
             config.save()?;
-            println!("✓ Schedule '{}' added", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "added", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Remove { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             remove_schedule_in_config(&mut config, &name)?;
             config.save()?;
-            println!("✓ Schedule '{}' removed", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "removed", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Enable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, true)?;
             config.save()?;
-            println!("✓ Schedule '{}' enabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "enabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Disable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, false)?;
             config.save()?;
-            println!("✓ Schedule '{}' disabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "disabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Trigger { name, dry_run } => {
@@ -1752,6 +1760,13 @@ fn validate_schedule(schedule: &AutopilotScheduleConfig) -> Result<(), String> {
         return Err("Schedule name cannot be empty".to_string());
     }
 
+    if schedule.name.trim() == crate::commands::watch::RELOAD_SENTINEL {
+        return Err(format!(
+            "Schedule name '{}' is reserved",
+            crate::commands::watch::RELOAD_SENTINEL
+        ));
+    }
+
     Cron::from_str(&schedule.cron)
         .map_err(|e| format!("Invalid cron expression '{}': {}", schedule.cron, e))?;
 
@@ -1798,6 +1813,46 @@ fn set_schedule_enabled_in_config(
 
     schedule.enabled = enabled;
     Ok(())
+}
+
+fn print_schedule_mutation_feedback(name: &str, action: &str, signaled: bool) {
+    if is_autopilot_running().is_some() {
+        if signaled {
+            println!("✓ Schedule '{}' {} (takes effect within ~1s)", name, action);
+        } else {
+            println!("✓ Schedule '{}' {} (takes effect within ~5s)", name, action);
+        }
+    } else {
+        println!(
+            "✓ Schedule '{}' {} (takes effect when autopilot starts)",
+            name, action
+        );
+    }
+}
+
+async fn signal_scheduler_reload() -> bool {
+    let db_path = match autopilot_db_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    let db = match crate::commands::watch::ScheduleDb::new(&db_path).await {
+        Ok(db) => db,
+        Err(_) => return false,
+    };
+
+    db.request_config_reload().await.is_ok()
+}
+
+fn autopilot_db_path() -> Result<String, String> {
+    let config = crate::commands::watch::ScheduleConfig::load_default()
+        .map_err(|error| format!("Failed to load watch config: {}", error))?;
+    let db_path = config.db_path();
+
+    db_path
+        .to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| "Invalid db path".to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -2623,7 +2678,7 @@ fn is_autopilot_running() -> Option<u32> {
         .db_path()
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join("watch.pid");
+        .join("autopilot.pid");
     let pid_str = std::fs::read_to_string(&pid_file).ok()?;
     let pid: u32 = pid_str.trim().parse().ok()?;
     if crate::commands::watch::is_process_running(pid) {
@@ -3084,6 +3139,17 @@ mod tests {
 
         let result = add_schedule_in_config(&mut config, schedule);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schedule_reserved_name_rejected() {
+        let mut config = AutopilotConfigFile::default();
+        let schedule = sample_schedule(crate::commands::watch::RELOAD_SENTINEL);
+
+        let result = add_schedule_in_config(&mut config, schedule);
+        assert!(result.is_err());
+        let message = result.expect_err("reserved schedule name should be rejected");
+        assert!(message.contains("reserved"));
     }
 
     #[test]

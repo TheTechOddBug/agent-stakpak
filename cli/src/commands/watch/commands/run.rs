@@ -8,6 +8,10 @@
 //! 5. Runs the scheduler loop
 //! 6. Handles graceful shutdown on SIGTERM/SIGINT
 
+use crate::commands::watch::db::RELOAD_SENTINEL;
+use crate::commands::watch::reconciler::{
+    RegisteredSchedule, ScheduleSnapshot, reconcile_schedules,
+};
 use crate::commands::watch::{
     RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig, assemble_prompt,
     is_process_running, run_check_script, spawn_agent,
@@ -15,10 +19,13 @@ use crate::commands::watch::{
 use chrono::{DateTime, Utc};
 use croner::Cron;
 use stakpak_shared::utils::sanitize_text_output;
+use std::collections::HashMap;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::signal;
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{error, info, warn};
 
 const HEARTBEAT_STALE_SECONDS: i64 = 120;
@@ -117,23 +124,42 @@ pub async fn run_scheduler() -> Result<(), String> {
     // Print config summary
     print_config_summary(&config, pid as i64);
 
+    // Keep configuration in shared state so pollers can read reloaded schedules.
+    let config_state = Arc::new(RwLock::new(Arc::new(config.clone())));
+
     // Create scheduler (returns scheduler and event receiver)
     let (mut scheduler, mut event_rx) = Scheduler::new()
         .await
         .map_err(|e| format!("Failed to create scheduler: {}", e))?;
 
-    // Register schedules and collect info for display
+    // Register enabled schedules and collect info for display + reconciliation snapshot.
     let mut registered_schedules = Vec::new();
+    let mut registered = HashMap::new();
     for schedule in &config.schedules {
-        if let Err(e) = scheduler.register_schedule(schedule.clone()).await {
-            error!(schedule = %schedule.name, error = %e, "Failed to register schedule, skipping");
-            eprintln!(
-                "  \x1b[31m✗\x1b[0m {} - failed to register: {}",
-                schedule.name, e
-            );
-        } else {
-            info!(schedule = %schedule.name, cron = %schedule.cron, "Registered schedule");
-            registered_schedules.push(schedule.clone());
+        if !schedule.enabled {
+            info!(schedule = %schedule.name, "Skipping disabled schedule");
+            continue;
+        }
+
+        match scheduler.register_schedule(schedule.clone()).await {
+            Ok(job_id) => {
+                info!(schedule = %schedule.name, cron = %schedule.cron, "Registered schedule");
+                registered_schedules.push(schedule.clone());
+                registered.insert(
+                    schedule.name.clone(),
+                    RegisteredSchedule {
+                        cron: schedule.cron.clone(),
+                        job_id,
+                    },
+                );
+            }
+            Err(e) => {
+                error!(schedule = %schedule.name, error = %e, "Failed to register schedule, skipping");
+                eprintln!(
+                    "  \x1b[31m✗\x1b[0m {} - failed to register: {}",
+                    schedule.name, e
+                );
+            }
         }
     }
 
@@ -143,33 +169,23 @@ pub async fn run_scheduler() -> Result<(), String> {
         .map_err(|e| format!("Failed to start scheduler: {}", e))?;
 
     info!("Scheduler started, waiting for schedules...");
-
-    // Print registered schedules table
     print_schedules_table(&registered_schedules);
 
-    // Wrap shared state in Arc for the event loop
+    let scheduler = Arc::new(Mutex::new(scheduler));
+    let schedule_snapshot = Arc::new(Mutex::new(ScheduleSnapshot { registered }));
+
     let db = Arc::new(db);
-    let config = Arc::new(config);
 
-    // Spawn event handler task for scheduled schedules
-    let db_clone = Arc::clone(&db);
-    let config_clone = Arc::clone(&config);
-    let event_handler = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            let db = Arc::clone(&db_clone);
-            let config = Arc::clone(&config_clone);
+    let config_path = crate::commands::watch::config::expand_tilde(
+        crate::commands::watch::config::STAKPAK_AUTOPILOT_CONFIG_PATH,
+    );
+    let initial_config_mtime = file_mtime(&config_path).await;
 
-            // Handle each schedule event in a separate task
-            tokio::spawn(async move {
-                if let Err(e) = handle_schedule_event(&db, &config, &event.schedule).await {
-                    error!(
-                        schedule = %event.schedule.name,
-                        error = %e,
-                        "Failed to handle schedule event"
-                    );
-                }
-            });
-        }
+    // Shutdown signal bridge.
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = shutdown_tx.send(()).await;
     });
 
     // Spawn heartbeat updater.
@@ -187,33 +203,54 @@ pub async fn run_scheduler() -> Result<(), String> {
         }
     });
 
-    // Spawn pending schedule poller for manual schedule fires
+    // Spawn pending schedule poller for manual schedule fires + config hot-reload signals.
     let db_clone2 = Arc::clone(&db);
-    let config_clone2 = Arc::clone(&config);
+    let config_clone2 = Arc::clone(&config_state);
+    let scheduler_clone2 = Arc::clone(&scheduler);
+    let snapshot_clone2 = Arc::clone(&schedule_snapshot);
+    let config_path_clone = config_path.clone();
     let pending_poller = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut last_mtime = initial_config_mtime;
+        let mut mtime_check_counter: u8 = 0;
+
         loop {
             interval.tick().await;
 
-            // Pop all pending schedules
             match db_clone2.pop_pending_schedules().await {
                 Ok(pending) => {
-                    for pending_schedule in pending {
-                        // Find the schedule config by name
-                        if let Some(schedule) = config_clone2
-                            .schedules
-                            .iter()
-                            .find(|s| s.name == pending_schedule.schedule_name)
-                        {
-                            let db = Arc::clone(&db_clone2);
-                            let schedule = schedule.clone();
-                            let config = Arc::clone(&config_clone2);
+                    let mut reload_requested = false;
 
-                            // Handle in a separate task
+                    for pending_schedule in pending {
+                        if pending_schedule.schedule_name == RELOAD_SENTINEL {
+                            reload_requested = true;
+                            continue;
+                        }
+
+                        let (schedule_opt, config_for_event) = {
+                            let cfg = config_clone2.read().await;
+                            let found = cfg
+                                .schedules
+                                .iter()
+                                .find(|s| s.name == pending_schedule.schedule_name)
+                                .cloned();
+                            (found, Arc::clone(&cfg))
+                        };
+
+                        if let Some(schedule) = schedule_opt {
+                            if !schedule.enabled {
+                                info!(schedule = %schedule.name, "Manual schedule ignored because it is disabled");
+                                continue;
+                            }
+
+                            let db = Arc::clone(&db_clone2);
+                            let config = config_for_event;
+
                             tokio::spawn(async move {
                                 info!(schedule = %schedule.name, "Manual schedule fired");
                                 print_event("fire", &schedule.name, "Manual schedule fired");
-                                if let Err(e) = handle_schedule_event(&db, &config, &schedule).await
+                                if let Err(e) =
+                                    handle_schedule_event(&db, config.as_ref(), &schedule).await
                                 {
                                     error!(
                                         schedule = %schedule.name,
@@ -229,29 +266,91 @@ pub async fn run_scheduler() -> Result<(), String> {
                             );
                         }
                     }
+
+                    if reload_requested {
+                        let success = trigger_config_reload(
+                            &scheduler_clone2,
+                            &config_clone2,
+                            &snapshot_clone2,
+                            &config_path_clone,
+                        )
+                        .await;
+                        if success {
+                            last_mtime = file_mtime(&config_path_clone).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(error = %e, "Failed to poll pending schedules");
                 }
             }
+
+            mtime_check_counter = mtime_check_counter.saturating_add(1);
+            if mtime_check_counter >= 5 {
+                mtime_check_counter = 0;
+                let current_mtime = file_mtime(&config_path_clone).await;
+
+                if current_mtime != last_mtime {
+                    // Always advance last_mtime so permanent rejections (e.g.
+                    // db_path changed) don't re-trigger every 5 seconds. If
+                    // the file is edited again the mtime will change once more
+                    // and we will retry.
+                    last_mtime = current_mtime;
+                    info!("Config file mtime changed, reloading schedules");
+                    trigger_config_reload(
+                        &scheduler_clone2,
+                        &config_clone2,
+                        &snapshot_clone2,
+                        &config_path_clone,
+                    )
+                    .await;
+                }
+            }
         }
     });
 
-    // Wait for shutdown signal
     info!("Autopilot running. Press Ctrl+C to stop.");
-    wait_for_shutdown_signal().await;
+
+    // Main loop: schedule events + shutdown.
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                break;
+            }
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some(event) => {
+                        let db = Arc::clone(&db);
+                        let config = {
+                            let cfg = config_state.read().await;
+                            Arc::clone(&cfg)
+                        };
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_schedule_event(&db, config.as_ref(), &event.schedule).await {
+                                error!(schedule = %event.schedule.name, error = %e, "Failed to handle schedule event");
+                            }
+                        });
+                    }
+                    None => {
+                        warn!("Scheduler event channel closed unexpectedly");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     println!();
     println!("\x1b[33mShutdown signal received, stopping autopilot service...\x1b[0m");
     info!("Shutdown signal received, stopping autopilot service...");
 
-    // Stop scheduler
-    if let Err(e) = scheduler.shutdown().await {
-        warn!(error = %e, "Failed to shutdown scheduler");
+    {
+        let mut scheduler_guard = scheduler.lock().await;
+        if let Err(e) = scheduler_guard.shutdown().await {
+            warn!(error = %e, "Failed to shutdown scheduler");
+        }
     }
 
-    // Cancel event handler, heartbeat updater, and pending poller
-    event_handler.abort();
     heartbeat_updater.abort();
     pending_poller.abort();
 
@@ -268,6 +367,94 @@ pub async fn run_scheduler() -> Result<(), String> {
     println!("\x1b[32mAutopilot stopped.\x1b[0m");
     info!("Autopilot stopped");
     Ok(())
+}
+
+async fn trigger_config_reload(
+    scheduler: &Arc<Mutex<Scheduler>>,
+    config: &Arc<RwLock<Arc<ScheduleConfig>>>,
+    snapshot: &Arc<Mutex<ScheduleSnapshot>>,
+    config_path: &Path,
+) -> bool {
+    trigger_config_reload_with_loader(scheduler, config, snapshot, || {
+        ScheduleConfig::load(config_path)
+    })
+    .await
+}
+
+async fn trigger_config_reload_with_loader<F>(
+    scheduler: &Arc<Mutex<Scheduler>>,
+    config: &Arc<RwLock<Arc<ScheduleConfig>>>,
+    snapshot: &Arc<Mutex<ScheduleSnapshot>>,
+    load_config: F,
+) -> bool
+where
+    F: Fn() -> Result<ScheduleConfig, crate::commands::watch::config::ConfigError>,
+{
+    let new_config = match load_config() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "Config reload failed (keeping current schedules)");
+            return false;
+        }
+    };
+
+    let current_db_path = {
+        let config_guard = config.read().await;
+        config_guard.db_path()
+    };
+
+    if new_config.db_path() != current_db_path {
+        warn!(
+            old = %current_db_path.display(),
+            new = %new_config.db_path().display(),
+            "Ignoring hot-reload because db_path changed; restart required"
+        );
+        return false;
+    }
+
+    // NOTE: snapshot is cloned before acquiring the scheduler lock. This is
+    // safe because this function is only called from the single pending_poller
+    // task — no concurrent caller can mutate the snapshot between the clone
+    // and the lock acquisition below.
+    let current_snapshot = {
+        let snapshot_guard = snapshot.lock().await;
+        snapshot_guard.clone()
+    };
+
+    let mut scheduler_guard = scheduler.lock().await;
+    let new_snapshot = reconcile_schedules(
+        &mut scheduler_guard,
+        &current_snapshot,
+        &new_config.schedules,
+    )
+    .await;
+    let active_count = new_snapshot.registered.len();
+    drop(scheduler_guard);
+
+    {
+        let mut snapshot_guard = snapshot.lock().await;
+        *snapshot_guard = new_snapshot;
+    }
+
+    {
+        let mut config_guard = config.write().await;
+        *config_guard = Arc::new(new_config);
+    }
+
+    print_event(
+        "reload",
+        "autopilot",
+        &format!("Config reloaded: {} schedules active", active_count),
+    );
+
+    true
+}
+
+async fn file_mtime(path: &Path) -> Option<SystemTime> {
+    tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
 }
 
 fn validate_prior_scheduler_state(
@@ -905,10 +1092,12 @@ fn print_event(event_type: &str, trigger_name: &str, message: &str) {
         "check" => ("\x1b[36m", "?"),
         "skip" => ("\x1b[2m", "--"),
         "agent" => ("\x1b[35m", "=>"),
+        "pause" => ("\x1b[33m", "||"),
         "done" => ("\x1b[32m", "OK"),
         "fail" => ("\x1b[31m", "XX"),
         "timeout" => ("\x1b[31m", "TO"),
         "clean" => ("\x1b[34m", "RC"),
+        "reload" => ("\x1b[34m", "RL"),
         _ => ("\x1b[0m", ".."),
     };
     println!(
@@ -919,9 +1108,83 @@ fn print_event(event_type: &str, trigger_name: &str, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_prior_scheduler_state;
-    use crate::commands::watch::db::SchedulerState;
+    use super::{trigger_config_reload_with_loader, validate_prior_scheduler_state};
+    use crate::commands::watch::db::{RELOAD_SENTINEL, SchedulerState};
+    use crate::commands::watch::reconciler::{RegisteredSchedule, ScheduleSnapshot};
+    use crate::commands::watch::{ScheduleConfig, ScheduleDb, Scheduler};
     use chrono::{Duration, Utc};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
+
+    fn escape_toml_string(value: &Path) -> String {
+        value.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    fn write_autopilot_config(path: &Path, db_path: &Path, schedules: &[(&str, &str, bool)]) {
+        let log_dir = db_path.parent().unwrap_or(Path::new(".")).join("logs");
+
+        let mut content = String::new();
+        content.push_str("[watch]\n");
+        content.push_str(&format!("db_path = \"{}\"\n", escape_toml_string(db_path)));
+        content.push_str(&format!(
+            "log_dir = \"{}\"\n\n",
+            escape_toml_string(&log_dir)
+        ));
+
+        for (name, cron, enabled) in schedules {
+            content.push_str("[[schedules]]\n");
+            content.push_str(&format!("name = \"{}\"\n", name));
+            content.push_str(&format!("cron = \"{}\"\n", cron));
+            content.push_str("prompt = \"test prompt\"\n");
+            content.push_str(&format!("enabled = {}\n\n", enabled));
+        }
+
+        std::fs::write(path, content).expect("failed to write autopilot config");
+    }
+
+    async fn build_runtime_state(
+        config: &ScheduleConfig,
+    ) -> (
+        Arc<AsyncMutex<Scheduler>>,
+        Arc<AsyncMutex<ScheduleSnapshot>>,
+        Arc<RwLock<Arc<ScheduleConfig>>>,
+        mpsc::Receiver<crate::commands::watch::scheduler::SchedulerEvent>,
+    ) {
+        let (mut scheduler_inner, event_rx) =
+            Scheduler::new().await.expect("failed to create scheduler");
+
+        let mut registered = HashMap::new();
+        for schedule in &config.schedules {
+            if !schedule.enabled {
+                continue;
+            }
+            let job_id = scheduler_inner
+                .register_schedule(schedule.clone())
+                .await
+                .expect("failed to register initial schedule");
+            registered.insert(
+                schedule.name.clone(),
+                RegisteredSchedule {
+                    cron: schedule.cron.clone(),
+                    job_id,
+                },
+            );
+        }
+
+        scheduler_inner
+            .start()
+            .await
+            .expect("failed to start scheduler");
+
+        let scheduler = Arc::new(AsyncMutex::new(scheduler_inner));
+        let snapshot = Arc::new(AsyncMutex::new(ScheduleSnapshot { registered }));
+        let config_state = Arc::new(RwLock::new(Arc::new(config.clone())));
+
+        (scheduler, snapshot, config_state, event_rx)
+    }
 
     #[test]
     fn test_validate_prior_scheduler_state_blocks_when_pid_running_and_heartbeat_fresh() {
@@ -940,5 +1203,309 @@ mod tests {
             message.contains("appears active"),
             "unexpected guard message: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_signal_applies_mutated_file_without_scheduler_restart() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(&config_path, &db_path, &[("alpha", "*/10 * * * *", true)]);
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        let db = ScheduleDb::new(db_path.to_str().expect("db path should be valid utf8"))
+            .await
+            .expect("failed to open schedule db");
+
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", true),
+            ],
+        );
+
+        db.request_config_reload()
+            .await
+            .expect("failed to request config reload");
+        let pending = db
+            .pop_pending_schedules()
+            .await
+            .expect("failed to pop pending schedules");
+        assert!(
+            pending
+                .iter()
+                .any(|item| item.schedule_name == RELOAD_SENTINEL)
+        );
+
+        let loader_path = config_path.clone();
+        trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+            ScheduleConfig::load(&loader_path)
+        })
+        .await;
+
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 2);
+        assert!(snapshot_guard.registered.contains_key("alpha"));
+        assert!(snapshot_guard.registered.contains_key("beta"));
+        drop(snapshot_guard);
+
+        let scheduler_guard = scheduler.lock().await;
+        assert_eq!(scheduler_guard.job_count(), 2);
+        drop(scheduler_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_ignores_db_path_changes() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(&config_path, &db_path, &[("alpha", "*/10 * * * *", true)]);
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        let changed_db_path: PathBuf = temp.path().join("other.db");
+        let mut changed_config = config.clone();
+        changed_config.watch.db_path = changed_db_path.to_string_lossy().to_string();
+
+        let success =
+            trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+                Ok(changed_config.clone())
+            })
+            .await;
+        assert!(!success, "db_path change should be rejected");
+
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 1);
+        assert!(snapshot_guard.registered.contains_key("alpha"));
+        drop(snapshot_guard);
+
+        let config_guard = config_state.read().await;
+        assert_eq!(config_guard.db_path(), db_path);
+        drop(config_guard);
+
+        let scheduler_guard = scheduler.lock().await;
+        assert_eq!(scheduler_guard.job_count(), 1);
+        drop(scheduler_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_returns_false_on_parse_error() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(&config_path, &db_path, &[("alpha", "*/10 * * * *", true)]);
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        let success =
+            trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, || {
+                Err(crate::commands::watch::config::ConfigError::ReadError(
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "simulated read failure"),
+                ))
+            })
+            .await;
+        assert!(!success, "parse failure should return false");
+
+        // State unchanged.
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 1);
+        drop(snapshot_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_removes_schedule() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", true),
+            ],
+        );
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        // Remove beta from config file.
+        write_autopilot_config(&config_path, &db_path, &[("alpha", "*/10 * * * *", true)]);
+
+        let loader_path = config_path.clone();
+        let success =
+            trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+                ScheduleConfig::load(&loader_path)
+            })
+            .await;
+        assert!(success);
+
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 1);
+        assert!(snapshot_guard.registered.contains_key("alpha"));
+        assert!(!snapshot_guard.registered.contains_key("beta"));
+        drop(snapshot_guard);
+
+        let scheduler_guard = scheduler.lock().await;
+        assert_eq!(scheduler_guard.job_count(), 1);
+        drop(scheduler_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_disables_schedule() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", true),
+            ],
+        );
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        // Disable beta.
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", false),
+            ],
+        );
+
+        let loader_path = config_path.clone();
+        let success =
+            trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+                ScheduleConfig::load(&loader_path)
+            })
+            .await;
+        assert!(success);
+
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 1);
+        assert!(snapshot_guard.registered.contains_key("alpha"));
+        assert!(
+            !snapshot_guard.registered.contains_key("beta"),
+            "disabled schedule should be unregistered"
+        );
+        drop(snapshot_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        assert_eq!(scheduler_guard.job_count(), 1);
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_reenables_schedule() {
+        let temp = tempdir().expect("failed to create temp directory");
+        let config_path = temp.path().join("autopilot.toml");
+        let db_path = temp.path().join("autopilot.db");
+
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", true),
+            ],
+        );
+
+        let config = ScheduleConfig::load(&config_path).expect("failed to load initial config");
+        let (scheduler, snapshot, config_state, _event_rx) = build_runtime_state(&config).await;
+
+        // Disable beta.
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", false),
+            ],
+        );
+        let loader_path = config_path.clone();
+        trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+            ScheduleConfig::load(&loader_path)
+        })
+        .await;
+
+        let snapshot_guard = snapshot.lock().await;
+        assert!(!snapshot_guard.registered.contains_key("beta"));
+        drop(snapshot_guard);
+
+        // Re-enable beta.
+        write_autopilot_config(
+            &config_path,
+            &db_path,
+            &[
+                ("alpha", "*/10 * * * *", true),
+                ("beta", "*/15 * * * *", true),
+            ],
+        );
+        let loader_path2 = config_path.clone();
+        let success =
+            trigger_config_reload_with_loader(&scheduler, &config_state, &snapshot, move || {
+                ScheduleConfig::load(&loader_path2)
+            })
+            .await;
+        assert!(success);
+
+        let snapshot_guard = snapshot.lock().await;
+        assert_eq!(snapshot_guard.registered.len(), 2);
+        assert!(snapshot_guard.registered.contains_key("alpha"));
+        assert!(
+            snapshot_guard.registered.contains_key("beta"),
+            "re-enabled schedule should be registered"
+        );
+        drop(snapshot_guard);
+
+        let mut scheduler_guard = scheduler.lock().await;
+        assert_eq!(scheduler_guard.job_count(), 2);
+        scheduler_guard
+            .shutdown()
+            .await
+            .expect("failed to shutdown scheduler");
     }
 }

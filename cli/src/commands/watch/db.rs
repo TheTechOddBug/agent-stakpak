@@ -90,6 +90,9 @@ pub struct ListRunsFilter {
     pub offset: Option<u32>,
 }
 
+/// Well-known sentinel name used to request in-process schedule config reload.
+pub const RELOAD_SENTINEL: &str = "__config_reload__";
+
 /// A pending schedule request (for manual schedule fires).
 #[derive(Debug, Clone)]
 pub struct PendingSchedule {
@@ -562,6 +565,25 @@ impl ScheduleDb {
         }
     }
 
+    /// Request a scheduler config reload using the pending_triggers signal queue.
+    pub async fn request_config_reload(&self) -> Result<(), DbError> {
+        let conn = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO pending_triggers (trigger_name, created_at)
+             SELECT ?, ?
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM pending_triggers WHERE trigger_name = ?
+             )",
+            (RELOAD_SENTINEL, now.as_str(), RELOAD_SENTINEL),
+        )
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Get and delete all pending schedules (atomic pop).
     pub async fn pop_pending_schedules(&self) -> Result<Vec<PendingSchedule>, DbError> {
         let conn = self.connection()?;
@@ -939,6 +961,73 @@ mod tests {
         // Second pop should return empty
         let pending = db.pop_pending_schedules().await.expect("Pop failed");
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_signal_roundtrip() {
+        let (db, _dir) = create_test_db().await;
+
+        db.request_config_reload()
+            .await
+            .expect("requesting config reload should succeed");
+
+        let pending = db
+            .pop_pending_schedules()
+            .await
+            .expect("pop should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].schedule_name, RELOAD_SENTINEL);
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_signal_is_deduplicated() {
+        let (db, _dir) = create_test_db().await;
+
+        db.request_config_reload()
+            .await
+            .expect("first reload request should succeed");
+        db.request_config_reload()
+            .await
+            .expect("second reload request should succeed");
+
+        let pending = db
+            .pop_pending_schedules()
+            .await
+            .expect("pop should succeed");
+
+        let count = pending
+            .iter()
+            .filter(|item| item.schedule_name == RELOAD_SENTINEL)
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_config_reload_sentinel_not_confused_with_real_trigger() {
+        let (db, _dir) = create_test_db().await;
+
+        db.request_config_reload()
+            .await
+            .expect("requesting config reload should succeed");
+        db.insert_pending_schedule("real-schedule")
+            .await
+            .expect("inserting real schedule should succeed");
+
+        let pending = db
+            .pop_pending_schedules()
+            .await
+            .expect("pop should succeed");
+        assert_eq!(pending.len(), 2);
+        assert!(
+            pending
+                .iter()
+                .any(|item| item.schedule_name == RELOAD_SENTINEL)
+        );
+        assert!(
+            pending
+                .iter()
+                .any(|item| item.schedule_name == "real-schedule")
+        );
     }
 
     #[tokio::test]

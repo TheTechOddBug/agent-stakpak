@@ -49,6 +49,9 @@ pub enum SchedulerError {
     #[error("Failed to shutdown scheduler: {0}")]
     ShutdownError(String),
 
+    #[error("Failed to remove job: {0}")]
+    RemoveJobError(String),
+
     #[error("Invalid cron expression '{expression}': {message}")]
     InvalidCron { expression: String, message: String },
 }
@@ -183,6 +186,24 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Remove a job by UUID.
+    pub async fn remove_job(&mut self, job_id: Uuid) -> Result<(), SchedulerError> {
+        if !self.job_ids.contains(&job_id) {
+            return Err(SchedulerError::RemoveJobError(format!(
+                "Job '{}' is not registered",
+                job_id
+            )));
+        }
+
+        self.scheduler
+            .remove(&job_id)
+            .await
+            .map_err(|e| SchedulerError::RemoveJobError(e.to_string()))?;
+
+        self.job_ids.retain(|id| *id != job_id);
+        Ok(())
+    }
+
     /// Get the number of registered jobs.
     pub fn job_count(&self) -> usize {
         self.job_ids.len()
@@ -228,6 +249,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            enabled: true,
         }
     }
 
@@ -304,6 +326,33 @@ mod tests {
         // Shutdown
         let shutdown_result = scheduler.shutdown().await;
         assert!(shutdown_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_remove_job() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
+        let schedule = create_test_schedule("remove-me", "0 * * * *");
+        let job_id = scheduler
+            .register_schedule(schedule)
+            .await
+            .expect("Failed to register schedule");
+
+        assert_eq!(scheduler.job_count(), 1);
+
+        scheduler
+            .remove_job(job_id)
+            .await
+            .expect("Failed to remove job");
+
+        assert_eq!(scheduler.job_count(), 0);
+        assert!(scheduler.job_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_job() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
+        let result = scheduler.remove_job(Uuid::new_v4()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
