@@ -2490,13 +2490,18 @@ pub fn render_task_wait_block(
             if let Some(agent_msg) = &pause_info.agent_message {
                 let trimmed_msg = agent_msg.trim();
                 if !trimmed_msg.is_empty() {
-                    // Truncate long messages
-                    let display_msg = if trimmed_msg.len() > inner_width.saturating_sub(6) {
-                        format!("{}…", &trimmed_msg[..inner_width.saturating_sub(7)])
+                    // Truncate long messages (char-aware to avoid slicing mid-character)
+                    let max_msg_chars = inner_width.saturating_sub(7);
+                    let display_msg = if calculate_display_width(trimmed_msg)
+                        > inner_width.saturating_sub(6)
+                    {
+                        let truncated: String = trimmed_msg.chars().take(max_msg_chars).collect();
+                        format!("{}…", truncated)
                     } else {
                         trimmed_msg.to_string()
                     };
-                    let msg_padding = inner_width.saturating_sub(display_msg.len() + 4);
+                    let msg_padding =
+                        inner_width.saturating_sub(calculate_display_width(&display_msg) + 4);
                     formatted_lines.push(Line::from(vec![
                         Span::styled("│", Style::default().fg(border_color)),
                         Span::from("     "),
