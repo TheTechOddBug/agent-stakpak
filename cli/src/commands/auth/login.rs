@@ -14,17 +14,25 @@ pub async fn handle_login(
     provider: &str,
     profile: Option<&str>,
     api_key: Option<String>,
+    url: Option<String>,
     region: Option<String>,
     aws_profile_name: Option<String>,
 ) -> Result<(), String> {
     // Bedrock has its own non-interactive flow (no API key needed)
     if provider == "bedrock" || provider == "amazon-bedrock" {
-        return handle_bedrock_setup(config_dir, profile, region, aws_profile_name).await;
+        return handle_bedrock_setup(config_dir, profile, region, aws_profile_name, url).await;
     }
 
     // Non-interactive mode when --api-key is provided
     if let Some(key) = api_key {
-        return handle_non_interactive_setup(config_dir, provider, profile, key).await;
+        return handle_non_interactive_setup(config_dir, provider, profile, key, url).await;
+    }
+
+    if url.is_some() {
+        let _validated_url = validate_login_url(url)?;
+        eprintln!(
+            "Warning: --url is currently applied only in non-interactive mode (--api-key). Ignoring in interactive flow."
+        );
     }
 
     // Interactive mode (existing behavior)
@@ -211,6 +219,28 @@ async fn handle_oauth_login(
     Ok(())
 }
 
+fn validate_login_url(url: Option<String>) -> Result<Option<String>, String> {
+    let Some(url) = url else {
+        return Ok(None);
+    };
+
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("--url cannot be empty".to_string());
+    }
+
+    let parsed =
+        reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid --url format: {}", e))?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(
+            "Invalid --url scheme: only http:// or https:// endpoints are supported".to_string(),
+        );
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
 /// Handle non-interactive setup with --api-key and --provider flags
 /// This initializes config and saves credentials in one step, mirroring interactive setup
 async fn handle_non_interactive_setup(
@@ -218,6 +248,7 @@ async fn handle_non_interactive_setup(
     provider_id: &str,
     profile: Option<&str>,
     api_key: String,
+    url: Option<String>,
 ) -> Result<(), String> {
     use crate::config::{ProfileConfig, ProviderType};
     use crate::onboarding::config_templates::{
@@ -232,13 +263,16 @@ async fn handle_non_interactive_setup(
     std::fs::create_dir_all(config_dir)
         .map_err(|e| format!("Failed to create config directory: {}", e))?;
 
+    let validated_url = validate_login_url(url)?;
+
     // Determine profile config based on provider
-    let profile_config = match provider_id {
+    let mut profile_config = match provider_id {
         "stakpak" => {
             // Stakpak API key -> Remote provider (key stored in config.toml)
             ProfileConfig {
                 provider: Some(ProviderType::Remote),
                 api_key: Some(api_key.clone()),
+                api_endpoint: validated_url.clone(),
                 ..ProfileConfig::default()
             }
         }
@@ -253,6 +287,16 @@ async fn handle_non_interactive_setup(
             ));
         }
     };
+
+    if provider_id != "stakpak"
+        && let Some(endpoint) = validated_url
+    {
+        let provider = profile_config
+            .providers
+            .get_mut(provider_id)
+            .ok_or_else(|| format!("Provider '{}' not found in generated profile", provider_id))?;
+        provider.set_api_endpoint(Some(endpoint));
+    }
 
     // Save API key to auth.toml for local providers (not stakpak)
     if provider_id != "stakpak" {
@@ -299,10 +343,18 @@ async fn handle_bedrock_setup(
     profile: Option<&str>,
     region: Option<String>,
     aws_profile_name: Option<String>,
+    url: Option<String>,
 ) -> Result<(), String> {
     use crate::config::{ProfileConfig, ProviderType};
     use crate::onboarding::save_config::save_to_profile;
     use stakpak_shared::models::llm::ProviderConfig;
+
+    if url.is_some() {
+        let _validated_url = validate_login_url(url)?;
+        eprintln!(
+            "Warning: --url is ignored for amazon-bedrock provider (uses AWS regional endpoints)."
+        );
+    }
 
     let region = region.unwrap_or_else(|| {
         println!("No --region specified, defaulting to us-east-1");
@@ -406,4 +458,170 @@ async fn handle_api_key_login(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConfigFile;
+
+    fn load_config(config_dir: &Path) -> Result<ConfigFile, String> {
+        let config_path = config_dir.join("config.toml");
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read {}: {}", config_path.display(), e))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse {}: {}", config_path.display(), e))
+    }
+
+    fn temp_dir() -> tempfile::TempDir {
+        match tempfile::TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("failed to create temp dir: {error}"),
+        }
+    }
+
+    async fn assert_non_interactive_provider_endpoint(provider_id: &str, endpoint: &str) {
+        let temp_dir = temp_dir();
+        let result = handle_non_interactive_setup(
+            temp_dir.path(),
+            provider_id,
+            Some("default"),
+            "test-key".to_string(),
+            Some(endpoint.to_string()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let config = load_config(temp_dir.path());
+        assert!(config.is_ok());
+
+        if let Ok(config) = config {
+            let profile = config.profiles.get("default");
+            assert!(profile.is_some());
+            if let Some(profile) = profile {
+                let endpoint_in_config = profile
+                    .providers
+                    .get(provider_id)
+                    .and_then(|provider| provider.api_endpoint());
+                assert_eq!(endpoint_in_config, Some(endpoint));
+            }
+        }
+    }
+
+    #[test]
+    fn validate_login_url_rejects_invalid_url() {
+        let result = validate_login_url(Some("not-a-url".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_login_url_rejects_empty_url() {
+        let result = validate_login_url(Some("   ".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_login_url_rejects_unsupported_scheme() {
+        let result = validate_login_url(Some("ftp://proxy.example.com".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_login_url_accepts_http_and_https() {
+        let http = validate_login_url(Some("http://localhost:4000".to_string()));
+        assert!(http.is_ok());
+
+        let https = validate_login_url(Some("https://proxy.example.com/v1".to_string()));
+        assert!(https.is_ok());
+    }
+
+    #[tokio::test]
+    async fn non_interactive_stakpak_sets_profile_api_endpoint() {
+        let temp_dir = temp_dir();
+
+        let endpoint = "https://self-hosted.example.com";
+        let result = handle_non_interactive_setup(
+            temp_dir.path(),
+            "stakpak",
+            Some("default"),
+            "spk-test".to_string(),
+            Some(endpoint.to_string()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let config = load_config(temp_dir.path());
+        assert!(config.is_ok());
+        if let Ok(config) = config {
+            let profile = config.profiles.get("default");
+            assert!(profile.is_some());
+            if let Some(profile) = profile {
+                assert_eq!(profile.api_endpoint.as_deref(), Some(endpoint));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_interactive_openai_sets_provider_api_endpoint() {
+        assert_non_interactive_provider_endpoint("openai", "https://openai-proxy.example.com/v1")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn non_interactive_anthropic_sets_provider_api_endpoint() {
+        assert_non_interactive_provider_endpoint(
+            "anthropic",
+            "https://anthropic-proxy.example.com",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn non_interactive_gemini_sets_provider_api_endpoint() {
+        assert_non_interactive_provider_endpoint("gemini", "https://gemini-proxy.example.com")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn bedrock_ignores_valid_url_after_validation() {
+        let temp_dir = temp_dir();
+
+        let result = handle_bedrock_setup(
+            temp_dir.path(),
+            Some("default"),
+            Some("us-east-1".to_string()),
+            None,
+            Some("https://ignored.example.com".to_string()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let config = load_config(temp_dir.path());
+        assert!(config.is_ok());
+        if let Ok(config) = config {
+            let profile = config.profiles.get("default");
+            assert!(profile.is_some());
+            if let Some(profile) = profile {
+                let bedrock = profile
+                    .providers
+                    .get("amazon-bedrock")
+                    .and_then(|provider| provider.api_endpoint());
+                assert_eq!(bedrock, None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bedrock_rejects_invalid_url_when_provided() {
+        let temp_dir = temp_dir();
+        let result = handle_bedrock_setup(
+            temp_dir.path(),
+            Some("default"),
+            Some("us-east-1".to_string()),
+            None,
+            Some("not-a-url".to_string()),
+        )
+        .await;
+        assert!(result.is_err());
+    }
 }
