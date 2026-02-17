@@ -90,6 +90,11 @@ impl DiscordChannel {
 
         let mut url = payload.url;
         if !url.contains('?') {
+            // Discord returns "wss://gateway.discord.gg" without a trailing slash
+            // and Cloudflare rejects URLs with no path component.
+            if !url.ends_with('/') {
+                url.push('/');
+            }
             url.push_str("?v=10&encoding=json");
         } else {
             if !url.contains("v=") {
@@ -234,7 +239,7 @@ impl Channel for DiscordChannel {
             let ws = match tokio_tungstenite::connect_async(&gateway_url).await {
                 Ok((stream, _response)) => stream,
                 Err(error) => {
-                    error!(error = %error, "discord websocket connect failed");
+                    error!(error = ?error, url = %gateway_url, "discord websocket connect failed");
                     tokio::time::sleep(std::time::Duration::from_secs(reconnect_backoff_secs))
                         .await;
                     reconnect_backoff_secs = (reconnect_backoff_secs * 2).min(30);
