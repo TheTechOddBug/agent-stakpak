@@ -229,8 +229,8 @@ fn validate_login_endpoint(endpoint: Option<String>) -> Result<Option<String>, S
         return Err("--endpoint cannot be empty".to_string());
     }
 
-    let parsed = reqwest::Url::parse(trimmed)
-        .map_err(|e| format!("Invalid --endpoint format: {}", e))?;
+    let parsed =
+        reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid --endpoint format: {}", e))?;
 
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(

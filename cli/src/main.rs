@@ -713,10 +713,7 @@ mod tests {
         if let Ok(cli) = parsed {
             match cli.command {
                 Some(Commands::Auth(commands::AuthCommands::Login { endpoint, .. })) => {
-                    assert_eq!(
-                        endpoint.as_deref(),
-                        Some("https://self-hosted.example.com")
-                    );
+                    assert_eq!(endpoint.as_deref(), Some("https://self-hosted.example.com"));
                 }
                 _ => panic!("Expected auth login command"),
             }
