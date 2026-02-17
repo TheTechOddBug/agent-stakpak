@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_auth_login_url_flag() {
+    fn cli_parses_auth_login_endpoint_flag() {
         let parsed = Cli::try_parse_from([
             "stakpak",
             "auth",
@@ -705,15 +705,18 @@ mod tests {
             "stakpak",
             "--api-key",
             "test-key",
-            "--url",
+            "--endpoint",
             "https://self-hosted.example.com",
         ]);
         assert!(parsed.is_ok());
 
         if let Ok(cli) = parsed {
             match cli.command {
-                Some(Commands::Auth(commands::AuthCommands::Login { url, .. })) => {
-                    assert_eq!(url.as_deref(), Some("https://self-hosted.example.com"));
+                Some(Commands::Auth(commands::AuthCommands::Login { endpoint, .. })) => {
+                    assert_eq!(
+                        endpoint.as_deref(),
+                        Some("https://self-hosted.example.com")
+                    );
                 }
                 _ => panic!("Expected auth login command"),
             }

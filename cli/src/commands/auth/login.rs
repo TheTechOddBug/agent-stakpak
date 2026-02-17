@@ -14,24 +14,24 @@ pub async fn handle_login(
     provider: &str,
     profile: Option<&str>,
     api_key: Option<String>,
-    url: Option<String>,
+    endpoint: Option<String>,
     region: Option<String>,
     aws_profile_name: Option<String>,
 ) -> Result<(), String> {
     // Bedrock has its own non-interactive flow (no API key needed)
     if provider == "bedrock" || provider == "amazon-bedrock" {
-        return handle_bedrock_setup(config_dir, profile, region, aws_profile_name, url).await;
+        return handle_bedrock_setup(config_dir, profile, region, aws_profile_name, endpoint).await;
     }
 
     // Non-interactive mode when --api-key is provided
     if let Some(key) = api_key {
-        return handle_non_interactive_setup(config_dir, provider, profile, key, url).await;
+        return handle_non_interactive_setup(config_dir, provider, profile, key, endpoint).await;
     }
 
-    if url.is_some() {
-        let _validated_url = validate_login_url(url)?;
+    if endpoint.is_some() {
+        let _validated = validate_login_endpoint(endpoint)?;
         eprintln!(
-            "Warning: --url is currently applied only in non-interactive mode (--api-key). Ignoring in interactive flow."
+            "Warning: --endpoint is currently applied only in non-interactive mode (--api-key). Ignoring in interactive flow."
         );
     }
 
@@ -219,22 +219,23 @@ async fn handle_oauth_login(
     Ok(())
 }
 
-fn validate_login_url(url: Option<String>) -> Result<Option<String>, String> {
-    let Some(url) = url else {
+fn validate_login_endpoint(endpoint: Option<String>) -> Result<Option<String>, String> {
+    let Some(endpoint) = endpoint else {
         return Ok(None);
     };
 
-    let trimmed = url.trim();
+    let trimmed = endpoint.trim();
     if trimmed.is_empty() {
-        return Err("--url cannot be empty".to_string());
+        return Err("--endpoint cannot be empty".to_string());
     }
 
-    let parsed =
-        reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid --url format: {}", e))?;
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("Invalid --endpoint format: {}", e))?;
 
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(
-            "Invalid --url scheme: only http:// or https:// endpoints are supported".to_string(),
+            "Invalid --endpoint scheme: only http:// or https:// endpoints are supported"
+                .to_string(),
         );
     }
 
@@ -248,7 +249,7 @@ async fn handle_non_interactive_setup(
     provider_id: &str,
     profile: Option<&str>,
     api_key: String,
-    url: Option<String>,
+    endpoint: Option<String>,
 ) -> Result<(), String> {
     use crate::config::{ProfileConfig, ProviderType};
     use crate::onboarding::config_templates::{
@@ -263,7 +264,7 @@ async fn handle_non_interactive_setup(
     std::fs::create_dir_all(config_dir)
         .map_err(|e| format!("Failed to create config directory: {}", e))?;
 
-    let validated_url = validate_login_url(url)?;
+    let validated_endpoint = validate_login_endpoint(endpoint)?;
 
     // Determine profile config based on provider
     let mut profile_config = match provider_id {
@@ -272,7 +273,7 @@ async fn handle_non_interactive_setup(
             ProfileConfig {
                 provider: Some(ProviderType::Remote),
                 api_key: Some(api_key.clone()),
-                api_endpoint: validated_url.clone(),
+                api_endpoint: validated_endpoint.clone(),
                 ..ProfileConfig::default()
             }
         }
@@ -289,7 +290,7 @@ async fn handle_non_interactive_setup(
     };
 
     if provider_id != "stakpak"
-        && let Some(endpoint) = validated_url
+        && let Some(endpoint) = validated_endpoint
     {
         let provider = profile_config
             .providers
@@ -343,16 +344,16 @@ async fn handle_bedrock_setup(
     profile: Option<&str>,
     region: Option<String>,
     aws_profile_name: Option<String>,
-    url: Option<String>,
+    endpoint: Option<String>,
 ) -> Result<(), String> {
     use crate::config::{ProfileConfig, ProviderType};
     use crate::onboarding::save_config::save_to_profile;
     use stakpak_shared::models::llm::ProviderConfig;
 
-    if url.is_some() {
-        let _validated_url = validate_login_url(url)?;
+    if endpoint.is_some() {
+        let _validated = validate_login_endpoint(endpoint)?;
         eprintln!(
-            "Warning: --url is ignored for amazon-bedrock provider (uses AWS regional endpoints)."
+            "Warning: --endpoint is ignored for amazon-bedrock provider (uses AWS regional endpoints)."
         );
     }
 
@@ -509,29 +510,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_login_url_rejects_invalid_url() {
-        let result = validate_login_url(Some("not-a-url".to_string()));
+    fn validate_login_endpoint_rejects_invalid_url() {
+        let result = validate_login_endpoint(Some("not-a-url".to_string()));
         assert!(result.is_err());
     }
 
     #[test]
-    fn validate_login_url_rejects_empty_url() {
-        let result = validate_login_url(Some("   ".to_string()));
+    fn validate_login_endpoint_rejects_empty_url() {
+        let result = validate_login_endpoint(Some("   ".to_string()));
         assert!(result.is_err());
     }
 
     #[test]
-    fn validate_login_url_rejects_unsupported_scheme() {
-        let result = validate_login_url(Some("ftp://proxy.example.com".to_string()));
+    fn validate_login_endpoint_rejects_unsupported_scheme() {
+        let result = validate_login_endpoint(Some("ftp://proxy.example.com".to_string()));
         assert!(result.is_err());
     }
 
     #[test]
-    fn validate_login_url_accepts_http_and_https() {
-        let http = validate_login_url(Some("http://localhost:4000".to_string()));
+    fn validate_login_endpoint_accepts_http_and_https() {
+        let http = validate_login_endpoint(Some("http://localhost:4000".to_string()));
         assert!(http.is_ok());
 
-        let https = validate_login_url(Some("https://proxy.example.com/v1".to_string()));
+        let https = validate_login_endpoint(Some("https://proxy.example.com/v1".to_string()));
         assert!(https.is_ok());
     }
 
