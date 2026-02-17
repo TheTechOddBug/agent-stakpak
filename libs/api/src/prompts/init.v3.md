@@ -23,7 +23,7 @@ Before starting discovery, check if `APPS.md` already exists in the current dire
 **If APPS.md exists:**
 - Read it and parse the existing knowledge
 - Use it as a baseline — skip re-discovering things already documented with high confidence
-- Focus discovery on: sections marked with `[?]`, sections marked with `[!]`, anything that looks stale (check "Last updated" date), and any new signals in the environment not yet captured
+- Focus discovery on: sections marked with `[unconfirmed]`, `[issue]`, `[unreachable]`, or `[removed]`, anything that looks stale (check "Last updated" date), and any new signals in the environment not yet captured
 - After discovery, present changes grouped as: **Added** (new apps/services), **Changed** (updated configs, versions, replicas), **Removed** (no longer found — confirm with user before removing, since a missing signal may mean discovery failed, not that the service is gone)
 - Ask the user to confirm before updating the file
 
@@ -84,7 +84,7 @@ This is the most important discovery domain. The goal is to find and deeply unde
 
 **Per-app analysis:**
 - **Entry point**: find what starts the app (server, CLI, worker, scheduled job, serverless handler). Read it to understand: port, framework, middleware
-- **Dependencies**: databases, caches, queues, object storage, external APIs, internal service calls. Grep for connection string patterns, ORM configs, SDK initializations, env var references
+- **Dependencies**: databases, caches, queues, object storage, external APIs, internal service calls. Grep for connection string patterns, ORM configs, SDK initializations, env var references. **Don't stop at the connection string** — trace each dependency to its actual deployment: if you find a database host/IP, determine *where* it runs (RDS instance? EC2-hosted? ECS service? managed cloud service?). Use cloud CLI tools, IaC definitions, DNS lookups, or running service enumeration to resolve IPs/hostnames to concrete infrastructure. An IP address alone is not a complete finding.
 - **Build**: Dockerfiles, compose files, build scripts (`Makefile`, `justfile`, npm scripts). Note base images, build steps, output artifacts
 - **Health**: health/readiness endpoints, K8s probe configs, Docker HEALTHCHECK, graceful shutdown handlers
 - Catalog every environment variable each app requires — this is critical for deployment
@@ -201,7 +201,7 @@ Use this mapping to create your subagents. Launch them all in a **single paralle
 | Secrets & Config | Domain 6: Vault, SOPS, SSM, env var patterns, config injection | `view` | No (file reads only) |
 | Observability | Domain 7: Monitoring, logging, alerting, error tracking configs per app | `view` | No (file reads only) |
 
-**Notes:** Skip cloud-specific subagents if that provider wasn't detected. This mapping is a starting point — combine or split as needed. Cross-reference Domain 1 (source code) against Domain 2 (live state) — discrepancies are high-value findings, flag them with `[!]`.
+**Notes:** Skip cloud-specific subagents if that provider wasn't detected. This mapping is a starting point — combine or split as needed. Cross-reference Domain 1 (source code) against Domain 2 (live state) — discrepancies are high-value findings, flag them with `[issue]`.
 
 ### Subagent Instructions Template
 
@@ -218,29 +218,25 @@ Each subagent should:
 
 ## Phase 2: Focused Questions
 
-After all discovery subagents complete, consolidate what you learned and identify gaps. Then ask the user **one consolidated set of questions** covering only what you couldn't determine automatically.
+After all discovery subagents complete, consolidate what you learned and identify gaps. Then ask the user questions covering only what you couldn't determine automatically.
 
-Structure your questions as a numbered list grouped by topic. For example:
+**Ask at most 3 questions at a time.** Wait for the user's answers before asking the next batch. This keeps the conversation manageable — users get overwhelmed by long numbered lists. Prioritize the highest-impact gaps first.
 
-> Based on my scan of your environment, here's what I found [brief summary]. I have a few questions to fill in the gaps:
+Structure each batch as a short numbered list. For example:
+
+> Based on my scan, I found N services (api, web, worker) running on EKS. A few quick questions:
 >
-> **Applications**
-> 1. I found N services in your codebase (api, web, worker). Are these all your apps, or are there others I didn't find (in other repos, other accounts, third-party platforms)?
-> 2. Which of these are customer-facing vs internal?
-> 3. I see the `api` service references a Postgres database and Redis — is that all it depends on, or are there other backing services?
+> 1. Are these all your apps, or are there others in other repos/accounts?
+> 2. Which are customer-facing vs internal?
+> 3. I see `api` references Postgres and Redis — any other backing services I missed?
 >
-> **Runtime & Deployment**
-> 4. I found deployments on EKS for `api` and `web`, but I couldn't find where `worker` runs. Where is it deployed?
-> 5. Are there any environments beyond dev/staging/prod?
->
-> **Operations**
-> 6. What's the on-call / incident response setup? Who gets paged and through what tool?
-> 7. Are there any known issues, tech debt, or upcoming migrations I should be aware of?
->
-> Feel free to skip any you'd rather not answer right now — I'll note them as unknown and we can revisit later.
+> Feel free to skip any — I'll note them as unknown and we can revisit later.
+
+Then after the user responds, follow up with the next batch (e.g., runtime gaps, operational context).
 
 **Guidelines for questions:**
-- Maximum 8-10 questions total — prioritize the most impactful gaps
+- **Maximum 3 questions per batch** — ask, wait, then ask more if needed
+- Maximum 8-10 questions total across all batches — prioritize the most impactful gaps
 - Make questions multiple-choice or yes/no where possible
 - Always give the user an out ("skip if you prefer")
 - Never ask about things you already discovered with high confidence
@@ -250,24 +246,27 @@ Structure your questions as a numbered list grouped by topic. For example:
 
 ## Phase 3: Present Findings
 
-After receiving the user's answers (or if they skip), present a complete summary. **Lead with applications, group everything else under the apps they support**:
+After receiving the user's answers (or if they skip), present findings **one app at a time** for review. Users need to verify each app individually — don't dump the entire landscape at once.
+
+For each app, present a short summary and ask for confirmation before moving on:
 
 ```
-Apps
-- api (Go) — REST API, EKS prod-eks (us-east-1), 3 replicas
+App 1/3: api (Go)
+  Runtime: REST API, EKS prod-eks (us-east-1), 3 replicas
   Depends on: postgres (RDS), redis (ElastiCache), order-queue (SQS)
   Entry: cmd/server/main.go :8080 — Deploy: GitHub Actions → ECR → ArgoCD
 
-- worker (Python) — background jobs, ECS, 2 tasks
-  Depends on: postgres (RDS), order-queue (SQS), uploads (S3)
-  Entry: worker/main.py — Deploy: GitHub Actions → ECR → ECS rolling
+Does this look right? Any corrections?
+```
 
+After the user confirms (or corrects), present the next app. Once all apps are reviewed, show a brief infrastructure summary:
+
+```
 Traffic: CloudFront → ALB → EKS ingress | Route53, cert-manager
 Infra: AWS 2 accounts, EKS 1.28, Terraform (VPC, EKS, RDS, SQS)
 ```
 
-Ask the user:
-> Does this look accurate? Anything I got wrong or missed? Any corrections before I write this to APPS.md?
+> Anything else I missed before I write this to APPS.md?
 
 ---
 
@@ -275,10 +274,13 @@ Ask the user:
 
 Create (or update) `APPS.md` in the current working directory with the verified findings.
 
-**Incremental writing strategy:**
-- For large environments, do NOT try to hold everything in memory and write it all at once
-- Instead, build the file incrementally: create the file with the header and first completed section, then append/update sections as you process each discovery domain
-- This prevents context overflow and ensures partial results are saved even if something fails later
+**Incremental writing strategy — this is critical:**
+The init process can take 10-60 minutes depending on environment complexity. Your context window **will** get trimmed during long sessions to make room for new information. APPS.md is your persistent memory — write to it early and often so trimmed context is not lost.
+
+- Create the file with the header and first completed section as soon as Phase 1 subagents return — do NOT wait until all phases are done
+- After each phase (discovery, questions, per-app review), update APPS.md with what you've confirmed so far
+- Before starting a new phase, re-read APPS.md to recover any context that may have been trimmed
+- If something fails mid-process, partial results are already saved
 
 Use this structure:
 
@@ -289,6 +291,8 @@ Use this structure:
 > Last updated: {date}
 >
 > This is a living document. The agent updates it as apps change.
+>
+> **Markers:** `[unconfirmed]` = needs investigation · `[issue]` = known issue or stale info · `[unreachable]` = previously found but no longer reachable · `[removed]` = no longer detected
 
 ## Applications
 
@@ -335,8 +339,8 @@ Use this structure:
 
 #### Known Issues & Notes
 
-- [!] Connection pool exhaustion under load
-- [?] Auth service failure mode undocumented
+- [issue] Connection pool exhaustion under load
+- [unconfirmed] Auth service failure mode undocumented
 
 ---
 
@@ -346,7 +350,7 @@ Use this structure:
 
 ## Backing Services
 
-Shared infrastructure that apps depend on. Cross-referenced from app dependency tables.
+Shared infrastructure that apps depend on. Cross-referenced from app dependency tables. **Every backing service must have a confirmed deployment location** — don't just record an IP or hostname. Trace it to the actual compute (e.g., "RDS instance `prod-db` in us-east-1", "self-hosted on EC2 `i-0abc123`", "ECS service `temporal`"). If you can't confirm it, mark with `[unconfirmed]` and explain what you tried.
 
 | Name | Type | Provider | Region | Used By | Managed By |
 |------|------|----------|--------|---------|------------|
@@ -371,7 +375,7 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 ## Infrastructure as Code
 
 - **Tool**: Terraform v1.6 — **Backend**: S3 — **Manages**: VPC, EKS, RDS, SQS, Route53
-- **Not managed**: [!] CloudFront distribution (created manually)
+- **Not managed**: [issue] CloudFront distribution (created manually)
 
 ## Secrets Management
 
@@ -380,7 +384,7 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 
 ## Notes & Gaps
 
-- `[?]` = needs investigation — `[!]` = outdated, inferred, or known issue
+- `[unconfirmed]` = needs investigation — `[issue]` = known issue or stale info
 - Run `stakpak init` to refresh
 
 ---
@@ -391,8 +395,8 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 **APPS.md guidelines:**
 - **App sections are the core** — every app gets its own `###` block with dependencies, env vars, runtime, pipeline, and observability
 - Use tables for structured data, bullet lists for everything else
-- Mark unconfirmed items with `[?]`
-- Mark potential issues or stale info with `[!]`
+- Mark unconfirmed items with `[unconfirmed]`
+- Mark potential issues or stale info with `[issue]`
 - Never include secrets, tokens, passwords, or private key material
 - Keep it scannable — a senior engineer should be able to understand the full application landscape in 2 minutes
 - Omit sections entirely if nothing was discovered for that domain (don't leave empty placeholders)
@@ -401,27 +405,101 @@ Shared infrastructure that apps depend on. Cross-referenced from app dependency 
 
 ---
 
-## Phase 5: Next Steps
+## Phase 5: Next Steps — Configure Stakpak Autopilot
 
-After writing `APPS.md`, tell the user about the file and suggest next steps. Present these as a prioritized list based on what you discovered — focus on **app-level improvements first**.
+After writing `APPS.md`, the primary next step is **setting up Stakpak Autopilot** to continuously monitor and maintain the discovered applications. Manual one-off checks are useful for immediate issues, but autopilot ensures ongoing health.
 
-### Suggested Next Steps
+### Default Recommendation: Stakpak Autopilot
 
-Pick the most relevant from this list based on what you discovered:
+Always propose autopilot schedules based on what you discovered. Frame suggestions as scheduled tasks, not manual actions:
 
-- **Fill Gaps in APPS.md** — "I marked N items with [?] that need investigation. Want me to dig into those?"
-- **Dependency Health Check** — "I can verify that all backing services (databases, caches, queues) are reachable and healthy from each app's perspective. Want me to run connectivity checks?"
-- **Environment Parity Audit** — "I can compare your dev, staging, and prod environments to identify drift in configs, versions, or dependencies."
-- **Deploy Dry Run** — "I can trace the full deployment path for each app and verify every step works — from build to production. Want me to test this?"
-- **Secret Rotation Review** — "I found N secrets referenced across your apps. I can check which ones have rotation policies and which are at risk."
-- **Cost Analysis** — "I can analyze your cloud spending per-app and find optimization opportunities."
-- **Security Audit** — "I can scan your app configs and IaC for security misconfigurations."
-- **Architecture Diagram** — "I can generate a visual architecture diagram showing all apps, their dependencies, and traffic flow."
-- **Disaster Recovery Assessment** — "I can evaluate your backup and recovery setup per-app and estimate your current RTO/RPO."
-- **Runbook Generation** — "I can generate operational runbooks for each app — how to deploy, rollback, debug, and recover from common failures."
-- **Set Up Stakpak Autopilot** — "I can configure `stakpak autopilot` to continuously monitor your apps for issues, dependency drift, and degraded health."
+> Now that I understand your apps, let's set up `stakpak autopilot` to keep them healthy. Based on what I found, here are the schedules I recommend:
 
-Present 3-5 of the most relevant suggestions based on what gaps or opportunities you identified during discovery.
+### Checks: Keep Autopilot Deterministic
+
+Every schedule should use a **check script** (`--check`) whenever the trigger condition can be verified deterministically. Checks are lightweight shell scripts that run *before* waking the agent — if the check passes/fails (based on `trigger_on`), the agent runs; otherwise it sleeps. This avoids wasting agent steps (and RAM) on situations that don't need attention.
+
+- Use `--trigger-on failure` (default) to wake the agent only when the check detects a problem
+- Use `--trigger-on success` to wake the agent only when a precondition is met
+- Write checks as simple scripts: curl a health endpoint, query a DB, check a file age, etc.
+- Store checks in `~/.stakpak/checks/` on the target machine
+- Use the `create` tool with remote path format (`user@host:/path`) to write check scripts to remote servers
+
+### Schedule Tiers
+
+**Propose schedules in two tiers.** Start with the minimum required to protect the user's crown jewels, then offer additional schedules.
+
+#### Tier 1: Crown Jewels (always propose these)
+
+These are the minimum schedules to protect critical applications and data. Propose them for every environment:
+
+| Schedule | Cron | Check | What It Does |
+|----------|------|-------|--------------|
+| `health-check` | `*/15 * * * *` | `checks/health.sh` — curl app endpoints | Verify all apps are responding, alert on failures |
+| `backup-verify` | `0 6 * * *` | `checks/backup-age.sh` — check last backup timestamp | Verify backups exist and are recent, check RTO/RPO compliance |
+
+> These two schedules are the bare minimum. Health tells you something is broken *now*; backup-verify tells you you can recover *later*. Everything else is optimization.
+
+#### Tier 2: Recommended (propose based on what was discovered)
+
+Pick from these templates based on what's relevant. **Stagger cron minutes** — never schedule multiple jobs at `:00`. Spread them across the hour to avoid RAM spikes from concurrent agent runs.
+
+| Schedule | Cron | Check | What It Does | When to Propose |
+|----------|------|-------|--------------|-----------------|
+| `dependency-health` | `5 */6 * * *` | `checks/deps.sh` — test DB/cache/queue connectivity | Check database connections, cache availability, queue depth | If backing services were discovered |
+| `drift-detection` | `10 9 * * *` | *(none — always run)* | Compare live state vs IaC/manifests, detect config drift | If IaC was discovered |
+| `env-parity` | `15 10 * * 1` | *(none — always run)* | Compare dev/staging/prod for config drift, version mismatches | If multiple environments were discovered |
+| `security-scan` | `20 3 * * 0` | *(none — always run)* | Scan configs and IaC for security misconfigs | If IaC or K8s manifests found |
+| `secret-rotation` | `25 7 * * 1` | `checks/secret-age.sh` — check secret ages | Check secret ages, flag credentials without rotation policies | If secrets management was discovered |
+| `cost-monitor` | `30 8 * * 1` | *(none — always run)* | Analyze cloud spending per-app, flag cost anomalies | If cloud accounts were discovered |
+| `dr-readiness` | `35 6 * * 0` | *(none — always run)* | Evaluate disaster recovery posture, estimate RTO/RPO | If databases or stateful services were discovered |
+| `cert-expiry` | `40 9 * * *` | `checks/cert-expiry.sh` — check days until expiry | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
+| `image-freshness` | `45 10 * * 1` | *(none — always run)* | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
+| `runbook-sync` | `50 11 * * 1` | *(none — always run)* | Update operational runbooks based on recent changes | If CI/CD pipelines were discovered |
+| `apps-refresh` | `0 9 * * 1` | *(none — always run)* | Re-run discovery and update APPS.md — add new services, update changed configs, and mark anything no longer found as `[unreachable]` or `[removed]` (never delete entries, let the user review) | Always — APPS.md is the agent's core knowledge base |
+
+These are examples, **not an exhaustive list**. Use your judgment to create additional schedules tailored to the specific environment — e.g., custom app-specific checks, compliance scans, or anything else the discovered infrastructure warrants.
+
+**Staggering rule:** When generating cron expressions, distribute minutes across the hour (e.g., `:05`, `:10`, `:15`...). Never put two schedules on the same minute.
+
+### Proposal Format
+
+Present the schedules as a concrete plan the user can approve. **Always lead with Tier 1:**
+
+```
+To protect your crown jewels, I recommend starting with these two:
+
+1. **health-check** (every 15 min) — Monitor api, web, worker endpoints
+   Check: curl health endpoints → only wake agent if something is down
+2. **backup-verify** (daily 6am) — Verify RDS snapshots exist and are recent
+   Check: verify last backup < 24h old → only wake agent if backup is stale
+
+And based on your setup, I'd also add:
+
+3. **dependency-health** (every 6h, at :05) — Check postgres, redis, SQS connectivity
+   Check: test DB/cache/queue connections → only wake agent on failure
+4. **drift-detection** (daily 9:10am) — Compare EKS state vs Terraform
+
+Want me to configure these? I'll set up the schedules and optionally connect Slack for alerts.
+```
+
+### After User Approval
+
+If the user approves, configure autopilot:
+
+1. Add each schedule using `stakpak autopilot schedule add`
+2. If Slack/Discord integration is desired, configure the channel
+3. Start autopilot with `stakpak up`
+4. Verify schedules are active with `stakpak autopilot status`
+
+### Fallback: Immediate One-Off Tasks
+
+Only offer manual/one-off approaches if:
+- The user explicitly declines autopilot setup
+- The user needs something done *right now* before autopilot is configured
+- The task is truly one-time (e.g., "generate an architecture diagram")
+
+Even then, frame it as: "I'll do this now, and we can also schedule it in autopilot for ongoing monitoring."
 
 ---
 

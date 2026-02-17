@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod local_storage_tests {
     use crate::storage::*;
     use stakpak_shared::models::integrations::openai::{ChatMessage, MessageContent, Role};
     use uuid::Uuid;
@@ -684,27 +684,29 @@ mod tests {
         // Manually insert a checkpoint with NULL state (simulating old schema data)
         let checkpoint_id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        storage
+        let conn = storage
             .connection()
-            .lock()
-            .await
-            .execute(
-                "INSERT INTO checkpoints (id, session_id, status, execution_depth, parent_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    checkpoint_id.to_string(),
-                    session.session_id.to_string(),
-                    "COMPLETE",
-                    0i64,
-                    None::<String>,
-                    None::<String>,  // NULL state
-                    now.to_rfc3339(),
-                    now.to_rfc3339(),
-                ),
-            )
-            .await
-            .unwrap();
+            .expect("failed to open test connection");
+        conn.execute(
+            "INSERT INTO checkpoints (id, session_id, status, execution_depth, parent_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                checkpoint_id.to_string(),
+                session.session_id.to_string(),
+                "COMPLETE",
+                0i64,
+                None::<String>,
+                None::<String>, // NULL state
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ),
+        )
+        .await
+        .expect("insert null-state checkpoint failed");
 
-        let fetched = storage.get_checkpoint(checkpoint_id).await.unwrap();
+        let fetched = storage
+            .get_checkpoint(checkpoint_id)
+            .await
+            .expect("fetch checkpoint failed");
         assert!(fetched.state.messages.is_empty());
     }
 
@@ -719,24 +721,26 @@ mod tests {
         // Insert checkpoint with malformed JSON state
         let checkpoint_id = Uuid::new_v4();
         let now = chrono::Utc::now();
-        storage
+        let conn = storage
             .connection()
-            .lock()
-            .await
-            .execute(
-                "INSERT INTO checkpoints (id, session_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (
-                    checkpoint_id.to_string(),
-                    session.session_id.to_string(),
-                    "not valid json",
-                    now.to_rfc3339(),
-                    now.to_rfc3339(),
-                ),
-            )
-            .await
-            .unwrap();
+            .expect("failed to open test connection");
+        conn.execute(
+            "INSERT INTO checkpoints (id, session_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                checkpoint_id.to_string(),
+                session.session_id.to_string(),
+                "not valid json",
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ),
+        )
+        .await
+        .expect("insert malformed-state checkpoint failed");
 
-        let fetched = storage.get_checkpoint(checkpoint_id).await.unwrap();
+        let fetched = storage
+            .get_checkpoint(checkpoint_id)
+            .await
+            .expect("fetch checkpoint failed");
         assert!(fetched.state.messages.is_empty());
     }
 
@@ -947,7 +951,9 @@ mod tests {
     #[tokio::test]
     async fn test_migrations_applied() {
         let storage = create_test_storage().await;
-        let conn = storage.connection().lock().await;
+        let conn = storage
+            .connection()
+            .expect("failed to open test connection");
 
         let version = crate::local::migrations::current_version(&conn)
             .await
@@ -962,7 +968,9 @@ mod tests {
     #[tokio::test]
     async fn test_migration_rollback() {
         let storage = create_test_storage().await;
-        let conn = storage.connection().lock().await;
+        let conn = storage
+            .connection()
+            .expect("failed to open test connection");
 
         // Should be at version 2
         let version = crate::local::migrations::current_version(&conn)
@@ -1088,11 +1096,8 @@ mod tests {
         );
         // All content should be preserved
         for msg in &result {
-            match &msg.content {
-                stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                    assert_ne!(s, "[trimmed]", "No messages should be trimmed");
-                }
-                _ => {}
+            if let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content {
+                assert_ne!(s, "[trimmed]", "No messages should be trimmed");
             }
         }
 
@@ -1196,29 +1201,24 @@ mod tests {
         // budget — but it MUST trim every assistant/tool message it can reach.
         // Verify all assistant messages before the trim boundary are trimmed.
         for (i, msg) in result.iter().enumerate() {
-            if i < trimmed_idx && msg.role == "assistant" {
-                match &msg.content {
-                    stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                        assert_eq!(
-                            s, "[trimmed]",
-                            "Assistant at {} before trim boundary should be trimmed",
-                            i
-                        );
-                    }
-                    _ => {}
-                }
+            if i < trimmed_idx
+                && msg.role == "assistant"
+                && let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content
+            {
+                assert_eq!(
+                    s, "[trimmed]",
+                    "Assistant at {} before trim boundary should be trimmed",
+                    i
+                );
             }
         }
 
         // User messages are never trimmed regardless of budget pressure
         for msg in &result {
-            if msg.role == "user" {
-                match &msg.content {
-                    stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                        assert_ne!(s, "[trimmed]", "User messages should never be trimmed");
-                    }
-                    _ => {}
-                }
+            if msg.role == "user"
+                && let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content
+            {
+                assert_ne!(s, "[trimmed]", "User messages should never be trimmed");
             }
         }
 
@@ -1409,28 +1409,22 @@ mod tests {
         // Verify: budget overrides keep_last_n — all trimmable messages before
         // the boundary are trimmed, user messages are always preserved.
         for (i, msg) in result2.iter().enumerate() {
-            if msg.role == "user" {
-                match &msg.content {
-                    stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                        assert_ne!(
-                            s, "[trimmed]",
-                            "Phase 2: user message {} should NOT be trimmed",
-                            i
-                        );
-                    }
-                    _ => {}
-                }
-            } else if i < trimmed_idx_2 {
-                match &msg.content {
-                    stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                        assert_eq!(
-                            s, "[trimmed]",
-                            "Phase 2: non-user message {} before boundary should be trimmed",
-                            i
-                        );
-                    }
-                    _ => {}
-                }
+            if msg.role == "user"
+                && let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content
+            {
+                assert_ne!(
+                    s, "[trimmed]",
+                    "Phase 2: user message {} should NOT be trimmed",
+                    i
+                );
+            } else if i < trimmed_idx_2
+                && let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content
+            {
+                assert_eq!(
+                    s, "[trimmed]",
+                    "Phase 2: non-user message {} before boundary should be trimmed",
+                    i
+                );
             }
         }
 
@@ -1693,11 +1687,8 @@ mod tests {
         // Should return the empty metadata as-is (no trimming triggered)
         // The function returns metadata unchanged when under threshold and prev_trimmed_up_to == 0
         for msg in &result {
-            match &msg.content {
-                stakpak_shared::models::llm::LLMMessageContent::String(s) => {
-                    assert_ne!(s, "[trimmed]", "No messages should be trimmed");
-                }
-                _ => {}
+            if let stakpak_shared::models::llm::LLMMessageContent::String(s) = &msg.content {
+                assert_ne!(s, "[trimmed]", "No messages should be trimmed");
             }
         }
     }
@@ -1709,7 +1700,9 @@ mod tests {
     #[tokio::test]
     async fn test_migration_rollback_to_version() {
         let storage = create_test_storage().await;
-        let conn = storage.connection().lock().await;
+        let conn = storage
+            .connection()
+            .expect("failed to open test connection");
 
         // Rollback to version 1 (keeps 1, removes 2)
         let rolled_back = crate::local::migrations::rollback_to(&conn, 1)

@@ -2275,6 +2275,568 @@ pub fn render_run_command_block(
     owned_lines
 }
 
+/// Render an ask_user tool block inline, similar to render_run_command_block.
+/// Shows a bordered block with tab bar, question content or review, and help text.
+pub fn render_ask_user_block(
+    questions: &[stakpak_shared::models::integrations::openai::AskUserQuestion],
+    answers: &std::collections::HashMap<
+        String,
+        stakpak_shared::models::integrations::openai::AskUserAnswer,
+    >,
+    current_tab: usize,
+    selected_option: usize,
+    custom_input: &str,
+    terminal_width: usize,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let content_width = if terminal_width > 4 {
+        terminal_width - 4
+    } else {
+        40
+    };
+    let inner_width = content_width;
+    let horizontal_line = "─".repeat(inner_width + 2);
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let dot_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    // Title with focus indicator
+    let base_title = if focused {
+        "Ask User (Tab to scroll)"
+    } else {
+        "Ask User (Tab to focus)"
+    };
+    let title_display_len = calculate_display_width(base_title);
+    let remaining_dashes = inner_width.saturating_sub(title_display_len + 2);
+
+    let title_border = Line::from(vec![
+        Span::styled("╭─", Style::default().fg(border_color)),
+        Span::styled(
+            "●",
+            Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {} ", base_title),
+            Style::default()
+                .fg(term_color(Color::White))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{}╮", "─".repeat(remaining_dashes)),
+            Style::default().fg(border_color),
+        ),
+    ]);
+
+    let bottom_border = Line::from(vec![Span::styled(
+        format!("╰{}╯", horizontal_line),
+        Style::default().fg(border_color),
+    )]);
+
+    let mut formatted_lines = Vec::new();
+    formatted_lines.push(title_border);
+
+    let max_content_width = inner_width;
+    let all_required_answered = questions
+        .iter()
+        .filter(|q| q.required)
+        .all(|q| answers.contains_key(&q.label));
+    let is_submit_tab = current_tab >= questions.len();
+
+    // --- Tab bar ---
+    {
+        let mut tab_spans = Vec::new();
+        tab_spans.push(Span::styled(" ← ", Style::default().fg(Color::DarkGray)));
+
+        for (i, q) in questions.iter().enumerate() {
+            let is_current = i == current_tab;
+            let is_answered = answers.contains_key(&q.label);
+            let checkbox = if is_answered { "✓ " } else { "□ " };
+            let style = if is_current {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else if is_answered {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let label = if q.label.chars().count() > 15 {
+                format!("{}...", q.label.chars().take(12).collect::<String>())
+            } else {
+                q.label.clone()
+            };
+            tab_spans.push(Span::styled(format!("{}{}", checkbox, label), style));
+            tab_spans.push(Span::raw("   "));
+        }
+
+        let submit_style = if is_submit_tab {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else if all_required_answered {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        tab_spans.push(Span::styled("Review", submit_style));
+        tab_spans.push(Span::styled(" →", Style::default().fg(Color::DarkGray)));
+
+        let tab_text: String = tab_spans.iter().map(|s| s.content.as_ref()).collect();
+        let tab_display_width = calculate_display_width(&tab_text);
+        let tab_padding = max_content_width.saturating_sub(tab_display_width);
+
+        let mut line_spans = vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" "),
+        ];
+        line_spans.extend(tab_spans);
+        line_spans.push(Span::from(" ".repeat(tab_padding)));
+        line_spans.push(Span::styled(" │", Style::default().fg(border_color)));
+        formatted_lines.push(Line::from(line_spans));
+    }
+
+    // --- Separator ---
+    formatted_lines.push(Line::from(vec![
+        Span::styled("├", Style::default().fg(border_color)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(border_color),
+        ),
+        Span::styled("┤", Style::default().fg(border_color)),
+    ]));
+
+    if is_submit_tab {
+        // --- Review / Submit content ---
+        // Empty line
+        formatted_lines.push(Line::from(vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" ".repeat(inner_width + 2)),
+            Span::styled("│", Style::default().fg(border_color)),
+        ]));
+
+        for q in questions {
+            let required_marker = if q.required { " *" } else { "" };
+            let label_text = format!("{}{}", q.label, required_marker);
+            let label_width = calculate_display_width(&label_text);
+            let label_padding = max_content_width.saturating_sub(label_width);
+            formatted_lines.push(Line::from(vec![
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::from(" "),
+                Span::styled(
+                    q.label.clone(),
+                    Style::default()
+                        .fg(term_color(Color::White))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(required_marker, Style::default().fg(Color::Red)),
+                Span::from(" ".repeat(label_padding)),
+                Span::styled(" │", Style::default().fg(border_color)),
+            ]));
+
+            if let Some(answer) = answers.get(&q.label) {
+                let display = if answer.is_custom {
+                    answer.answer.clone()
+                } else {
+                    q.options
+                        .iter()
+                        .find(|o| o.value == answer.answer)
+                        .map(|o| o.label.clone())
+                        .unwrap_or_else(|| answer.answer.clone())
+                };
+                let max_display = max_content_width.saturating_sub(4);
+                let display = if display.chars().count() > max_display {
+                    format!(
+                        "{}…",
+                        display
+                            .chars()
+                            .take(max_display.saturating_sub(1))
+                            .collect::<String>()
+                    )
+                } else {
+                    display
+                };
+                let answer_text = format!("    {}", display);
+                let answer_width = calculate_display_width(&answer_text);
+                let answer_padding = max_content_width.saturating_sub(answer_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::raw("    "),
+                    Span::styled(display, Style::default().fg(Color::Cyan)),
+                    Span::from(" ".repeat(answer_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            } else if q.required {
+                let text = "  □ not answered";
+                let text_width = calculate_display_width(text);
+                let text_padding = max_content_width.saturating_sub(text_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::styled("  □ ", Style::default().fg(Color::Yellow)),
+                    Span::styled("not answered", Style::default().fg(Color::Yellow)),
+                    Span::from(" ".repeat(text_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            } else {
+                let text = "  — skipped";
+                let text_width = calculate_display_width(text);
+                let text_padding = max_content_width.saturating_sub(text_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::styled("  — ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("skipped", Style::default().fg(Color::DarkGray)),
+                    Span::from(" ".repeat(text_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            }
+
+            // Spacing between questions
+            formatted_lines.push(Line::from(vec![
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::from(" ".repeat(inner_width + 2)),
+                Span::styled("│", Style::default().fg(border_color)),
+            ]));
+        }
+
+        if !all_required_answered {
+            let warn = "Answer all required (*) questions to submit";
+            let warn_width = calculate_display_width(warn);
+            let warn_padding = max_content_width.saturating_sub(warn_width);
+            formatted_lines.push(Line::from(vec![
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::from(" "),
+                Span::styled(warn, Style::default().fg(Color::Yellow)),
+                Span::from(" ".repeat(warn_padding)),
+                Span::styled(" │", Style::default().fg(border_color)),
+            ]));
+        }
+    } else if let Some(q) = questions.get(current_tab) {
+        // --- Question content ---
+        let previous_answer = answers.get(&q.label);
+
+        // Empty line
+        formatted_lines.push(Line::from(vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" ".repeat(inner_width + 2)),
+            Span::styled("│", Style::default().fg(border_color)),
+        ]));
+
+        // Question text (wrapped)
+        let text_width = max_content_width.saturating_sub(2);
+        let wrapped_question = wrap_text_by_word(&q.question, text_width);
+        for line in &wrapped_question {
+            let line_width = calculate_display_width(line);
+            let padding = max_content_width.saturating_sub(line_width);
+            formatted_lines.push(Line::from(vec![
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::from(" "),
+                Span::styled(
+                    line.clone(),
+                    Style::default()
+                        .fg(term_color(Color::White))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::from(" ".repeat(padding)),
+                Span::styled(" │", Style::default().fg(border_color)),
+            ]));
+        }
+
+        // Empty line
+        formatted_lines.push(Line::from(vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" ".repeat(inner_width + 2)),
+            Span::styled("│", Style::default().fg(border_color)),
+        ]));
+
+        // Options
+        for (i, opt) in q.options.iter().enumerate() {
+            let is_selected = i == selected_option;
+            let is_answered = previous_answer
+                .map(|a| !a.is_custom && a.answer == opt.value)
+                .unwrap_or(false);
+
+            let bracket = if is_answered {
+                "[✓]".to_string()
+            } else if is_selected {
+                "[*]".to_string()
+            } else {
+                format!("[{}]", i + 1)
+            };
+
+            let bracket_style = if is_answered {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let label_style = if is_answered {
+                Style::default().fg(Color::Cyan)
+            } else if is_selected {
+                Style::default()
+                    .fg(term_color(Color::White))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let opt_text = format!("{} {}", bracket, opt.label);
+            let opt_width = calculate_display_width(&opt_text);
+            let opt_padding = max_content_width.saturating_sub(opt_width);
+            formatted_lines.push(Line::from(vec![
+                Span::styled("│", Style::default().fg(border_color)),
+                Span::from(" "),
+                Span::styled(bracket.clone(), bracket_style),
+                Span::raw(" "),
+                Span::styled(opt.label.clone(), label_style),
+                Span::from(" ".repeat(opt_padding)),
+                Span::styled(" │", Style::default().fg(border_color)),
+            ]));
+
+            if let Some(desc) = &opt.description {
+                let desc_style = if is_selected || is_answered {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let desc_text = format!("       {}", desc);
+                let desc_width = calculate_display_width(&desc_text);
+                let desc_padding = max_content_width.saturating_sub(desc_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::styled(desc_text, desc_style),
+                    Span::from(" ".repeat(desc_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            }
+        }
+
+        // Custom input option
+        if q.allow_custom {
+            let custom_idx = q.options.len();
+            let is_selected = selected_option == custom_idx;
+            let is_custom_answered = previous_answer.map(|a| a.is_custom).unwrap_or(false);
+
+            let (bracket, bracket_style) = if is_custom_answered {
+                (
+                    "[✓]".to_string(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if is_selected {
+                (
+                    "[*]".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    format!("[{}]", custom_idx + 1),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+
+            if is_selected {
+                if custom_input.is_empty() {
+                    let text = format!("{} │Type your answer...", bracket);
+                    let text_width = calculate_display_width(&text);
+                    let text_padding = max_content_width.saturating_sub(text_width);
+                    formatted_lines.push(Line::from(vec![
+                        Span::styled("│", Style::default().fg(border_color)),
+                        Span::from(" "),
+                        Span::styled(bracket, bracket_style),
+                        Span::raw(" "),
+                        Span::styled("│", Style::default().fg(Color::Cyan)),
+                        Span::styled("Type your answer...", Style::default().fg(Color::DarkGray)),
+                        Span::from(" ".repeat(text_padding)),
+                        Span::styled(" │", Style::default().fg(border_color)),
+                    ]));
+                } else {
+                    let text = format!("{} {}│", bracket, custom_input);
+                    let text_width = calculate_display_width(&text);
+                    let text_padding = max_content_width.saturating_sub(text_width);
+                    formatted_lines.push(Line::from(vec![
+                        Span::styled("│", Style::default().fg(border_color)),
+                        Span::from(" "),
+                        Span::styled(bracket, bracket_style),
+                        Span::raw(" "),
+                        Span::styled(
+                            custom_input.to_string(),
+                            Style::default()
+                                .fg(term_color(Color::White))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("│", Style::default().fg(Color::Cyan)),
+                        Span::from(" ".repeat(text_padding)),
+                        Span::styled(" │", Style::default().fg(border_color)),
+                    ]));
+                }
+            } else if is_custom_answered && let Some(answer) = previous_answer {
+                let text = format!("{} {}", bracket, answer.answer);
+                let text_width = calculate_display_width(&text);
+                let text_padding = max_content_width.saturating_sub(text_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::styled(bracket, bracket_style),
+                    Span::raw(" "),
+                    Span::styled(answer.answer.clone(), Style::default().fg(Color::Cyan)),
+                    Span::from(" ".repeat(text_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            } else {
+                let text = format!("{} Other...", bracket);
+                let text_width = calculate_display_width(&text);
+                let text_padding = max_content_width.saturating_sub(text_width);
+                formatted_lines.push(Line::from(vec![
+                    Span::styled("│", Style::default().fg(border_color)),
+                    Span::from(" "),
+                    Span::styled(bracket, bracket_style),
+                    Span::raw(" "),
+                    Span::styled("Other...", Style::default().fg(Color::DarkGray)),
+                    Span::from(" ".repeat(text_padding)),
+                    Span::styled(" │", Style::default().fg(border_color)),
+                ]));
+            }
+        }
+
+        // Empty line after options
+        formatted_lines.push(Line::from(vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" ".repeat(inner_width + 2)),
+            Span::styled("│", Style::default().fg(border_color)),
+        ]));
+    }
+
+    // --- Separator before help ---
+    formatted_lines.push(Line::from(vec![
+        Span::styled("├", Style::default().fg(border_color)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(border_color),
+        ),
+        Span::styled("┤", Style::default().fg(border_color)),
+    ]));
+
+    // --- Help text ---
+    {
+        let help_spans = if !focused {
+            // Unfocused: just show how to focus
+            vec![
+                Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+                Span::styled(" focus", Style::default().fg(Color::Cyan)),
+                Span::raw(" · "),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::styled(" cancel", Style::default().fg(Color::Cyan)),
+            ]
+        } else if is_submit_tab && all_required_answered {
+            vec![
+                Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+                Span::styled(" submit", Style::default().fg(Color::Green)),
+                Span::raw(" · "),
+                Span::styled("←/→", Style::default().fg(Color::DarkGray)),
+                Span::styled(" questions", Style::default().fg(Color::Cyan)),
+                Span::raw(" · "),
+                Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+                Span::styled(" scroll", Style::default().fg(Color::Cyan)),
+                Span::raw(" · "),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::styled(" unfocus", Style::default().fg(Color::Cyan)),
+            ]
+        } else if is_submit_tab {
+            vec![
+                Span::styled("←/→", Style::default().fg(Color::DarkGray)),
+                Span::styled(" questions", Style::default().fg(Color::Cyan)),
+                Span::raw(" · "),
+                Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+                Span::styled(" scroll", Style::default().fg(Color::Cyan)),
+                Span::raw(" · "),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::styled(" unfocus", Style::default().fg(Color::Cyan)),
+            ]
+        } else {
+            let is_custom_selected = questions
+                .get(current_tab)
+                .map(|q| q.allow_custom && selected_option == q.options.len())
+                .unwrap_or(false);
+
+            if is_custom_selected {
+                vec![
+                    Span::styled("Type", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" your answer", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" confirm", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" options", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" scroll", Style::default().fg(Color::Cyan)),
+                ]
+            } else {
+                vec![
+                    Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" select", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" options", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("←/→", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" questions", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("1-9", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" quick", Style::default().fg(Color::Cyan)),
+                    Span::raw(" · "),
+                    Span::styled("Tab", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" scroll", Style::default().fg(Color::Cyan)),
+                ]
+            }
+        };
+
+        let help_text: String = help_spans.iter().map(|s| s.content.as_ref()).collect();
+        let help_width = calculate_display_width(&help_text);
+        let help_padding = max_content_width.saturating_sub(help_width);
+
+        let mut line_spans = vec![
+            Span::styled("│", Style::default().fg(border_color)),
+            Span::from(" "),
+        ];
+        line_spans.extend(help_spans);
+        line_spans.push(Span::from(" ".repeat(help_padding)));
+        line_spans.push(Span::styled(" │", Style::default().fg(border_color)));
+        formatted_lines.push(Line::from(line_spans));
+    }
+
+    formatted_lines.push(bottom_border);
+
+    // Convert to owned lines
+    formatted_lines
+        .into_iter()
+        .map(|line| {
+            let owned_spans: Vec<Span<'static>> = line
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect();
+            Line::from(owned_spans)
+        })
+        .collect()
+}
+
 /// Render a task wait block showing progress of background tasks
 /// Displays a bordered box with task statuses and overall progress
 pub fn render_task_wait_block(
@@ -2491,13 +3053,18 @@ pub fn render_task_wait_block(
             if let Some(agent_msg) = &pause_info.agent_message {
                 let trimmed_msg = agent_msg.trim();
                 if !trimmed_msg.is_empty() {
-                    // Truncate long messages
-                    let display_msg = if trimmed_msg.len() > inner_width.saturating_sub(6) {
-                        format!("{}…", &trimmed_msg[..inner_width.saturating_sub(7)])
+                    // Truncate long messages (char-aware to avoid slicing mid-character)
+                    let max_msg_chars = inner_width.saturating_sub(7);
+                    let display_msg = if calculate_display_width(trimmed_msg)
+                        > inner_width.saturating_sub(6)
+                    {
+                        let truncated: String = trimmed_msg.chars().take(max_msg_chars).collect();
+                        format!("{}…", truncated)
                     } else {
                         trimmed_msg.to_string()
                     };
-                    let msg_padding = inner_width.saturating_sub(display_msg.len() + 4);
+                    let msg_padding =
+                        inner_width.saturating_sub(calculate_display_width(&display_msg) + 4);
                     formatted_lines.push(Line::from(vec![
                         Span::styled("│", Style::default().fg(border_color)),
                         Span::from("     "),

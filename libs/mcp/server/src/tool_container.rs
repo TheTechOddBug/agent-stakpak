@@ -6,7 +6,6 @@ use rmcp::{
 };
 use stakpak_api::AgentProvider;
 use stakpak_shared::remote_connection::RemoteConnectionManager;
-use stakpak_shared::secret_manager::SecretManager;
 use stakpak_shared::task_manager::TaskManagerHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +13,6 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ToolContainer {
     pub client: Option<Arc<dyn AgentProvider>>,
-    pub secret_manager: SecretManager,
     pub task_manager: Arc<TaskManagerHandle>,
     pub remote_connection_manager: Arc<RemoteConnectionManager>,
     pub enabled_tools: EnabledToolsConfig,
@@ -26,8 +24,6 @@ pub struct ToolContainer {
 impl ToolContainer {
     pub fn new(
         client: Option<Arc<dyn AgentProvider>>,
-        redact_secrets: bool,
-        privacy_mode: bool,
         enabled_tools: EnabledToolsConfig,
         task_manager: Arc<TaskManagerHandle>,
         tool_router: ToolRouter<Self>,
@@ -35,17 +31,12 @@ impl ToolContainer {
     ) -> Result<Self, String> {
         Ok(Self {
             client,
-            secret_manager: SecretManager::new(redact_secrets, privacy_mode),
             task_manager,
             remote_connection_manager: Arc::new(RemoteConnectionManager::new()),
             enabled_tools,
             tool_router,
             skill_directories,
         })
-    }
-
-    pub fn get_secret_manager(&self) -> &SecretManager {
-        &self.secret_manager
     }
 
     pub fn get_client(&self) -> Option<&Arc<dyn AgentProvider>> {

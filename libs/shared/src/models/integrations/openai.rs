@@ -615,9 +615,9 @@ pub struct TaskPauseInfo {
     pub pending_tool_calls: Option<Vec<crate::models::async_manifest::PendingToolCall>>,
 }
 
-// =============================================================================
-// Chat Completion Types (used by TUI)
-// =============================================================================
+pub use crate::models::tools::ask_user::{
+    AskUserAnswer, AskUserOption, AskUserQuestion, AskUserRequest, AskUserResult,
+};
 
 /// Chat completion request
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
