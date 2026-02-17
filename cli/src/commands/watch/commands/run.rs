@@ -254,7 +254,8 @@ pub async fn run_scheduler(server: AgentServerConnection) -> Result<(), String> 
                                 info!(schedule = %schedule.name, "Manual schedule fired");
                                 print_event("fire", &schedule.name, "Manual schedule fired");
                                 if let Err(e) =
-                                    handle_schedule_event(&db, config.as_ref(), &schedule, &server).await
+                                    handle_schedule_event(&db, config.as_ref(), &schedule, &server)
+                                        .await
                                 {
                                     error!(
                                         schedule = %schedule.name,
