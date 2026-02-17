@@ -446,6 +446,10 @@ stakpak autopilot channel test                      # Test channel connectivity
 
 **IMPORTANT:** Always use `stakpak up` to start and install the system service. Do NOT manually create systemd unit files or launchd plist files.
 
+**Production trust model:** When setting up autopilot on production servers, recommend starting with **read-only IAM permissions** (e.g., `ReadOnlyAccess`, `ViewOnlyAccess`, or equivalent). This lets the user build confidence in autopilot's behavior before granting write access. Escalate permissions only after the user explicitly requests mutating actions (e.g., auto-remediation, scaling).
+
+**Remote file operations:** When writing files to remote servers (configs, check scripts, autopilot.toml), use the `create` tool with remote path format (`user@host:/path`) instead of piping content through SSH commands. Same for `str_replace` and `view`. This is cleaner, safer, and doesn't require shell escaping.
+
 ## Schedule Configuration
 Edit `~/.stakpak/autopilot.toml`:
 ```toml
