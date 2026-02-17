@@ -880,14 +880,7 @@ async fn start_foreground_runtime(
             .try_init();
     }
 
-    // --- 1. Schedule runtime ---
-    let schedule_task = tokio::spawn(async {
-        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
-            eprintln!("Schedule runtime exited: {}", error);
-        }
-    });
-
-    // --- 2. Server runtime ---
+    // --- 1. Server runtime (bind listener first so schedule runtime can connect) ---
     let bind = options.bind.clone();
     let (auth_config, generated_auth_token) = if options.no_auth {
         (stakpak_server::AuthConfig::disabled(), None)
@@ -1036,14 +1029,31 @@ async fn start_foreground_runtime(
         Some(mcp_init_result.proxy_shutdown_tx),
     );
 
-    // --- 3. Gateway runtime ---
-    let config_path = AutopilotConfigFile::path();
+    // --- 2. Schedule runtime (uses co-hosted server API) ---
     let loopback_url = loopback_server_url(listener_addr);
     let loopback_token = if options.no_auth {
         String::new()
     } else {
         generated_auth_token.clone().unwrap_or_default()
     };
+
+    let server_model_id = app_state
+        .default_model
+        .as_ref()
+        .map(|m| format!("{}/{}", m.provider, m.id));
+    let schedule_server = crate::commands::watch::AgentServerConnection {
+        url: loopback_url.clone(),
+        token: loopback_token.clone(),
+        model: server_model_id,
+    };
+    let schedule_task = tokio::spawn(async move {
+        if let Err(error) = crate::commands::watch::commands::run_scheduler(schedule_server).await {
+            eprintln!("Schedule runtime exited: {}", error);
+        }
+    });
+
+    // --- 3. Gateway runtime ---
+    let config_path = AutopilotConfigFile::path();
 
     let gateway_cli = stakpak_gateway::GatewayCliFlags {
         url: Some(loopback_url),
