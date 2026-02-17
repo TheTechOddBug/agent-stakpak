@@ -2,7 +2,7 @@ use crate::tool_container::ToolContainer;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, handler::server::wrapper::Parameters, model::*, schemars, tool};
 use rmcp::{RoleServer, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use stakpak_shared::file_backup_manager::FileBackupManager;
 use stakpak_shared::remote_connection::{
     PathLocation, RemoteConnection, RemoteConnectionInfo, RemoteFileSystemProvider,
@@ -45,12 +45,24 @@ pub struct RunCommandRequest {
     pub description: Option<String>,
     #[schemars(description = "Optional timeout for the command execution in seconds")]
     pub timeout: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_trimmed_string"
+    )]
     #[schemars(
-        description = "Optional remote connection string (format: user@host or user@host:port)"
+        description = "Optional remote connection string (format: user@host or user@host:port). Omit this field for local execution; do not send an empty string."
     )]
     pub remote: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_preserved_string"
+    )]
     #[schemars(description = "Optional password for remote connection")]
     pub password: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_nonempty_trimmed_string"
+    )]
     #[schemars(description = "Optional path to private key for remote connection")]
     pub private_key_path: Option<String>,
 }
@@ -59,6 +71,39 @@ pub struct RunCommandRequest {
 pub struct CommandResult {
     pub output: String,
     pub exit_code: i32,
+}
+
+fn deserialize_optional_nonempty_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
+}
+
+fn deserialize_optional_nonempty_preserved_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        if raw.trim().is_empty() {
+            None
+        } else {
+            Some(raw)
+        }
+    }))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -200,6 +245,8 @@ pub struct ViewWebPageRequest {
     #[schemars(description = "The HTTPS URL of the web page to fetch and convert to markdown")]
     pub url: String,
 }
+
+use stakpak_shared::models::tools::ask_user::AskUserRequest;
 
 #[tool_router(router = tool_router_local, vis = "pub")]
 impl ToolContainer {
@@ -2733,8 +2780,9 @@ SAFETY NOTES:
                 None
             } else {
                 lines.iter().rev().find(|l| !l.is_empty()).map(|l| {
-                    if l.len() > 50 {
-                        format!("{}...", &l[..50])
+                    if l.chars().count() > 50 {
+                        let truncated: String = l.chars().take(50).collect();
+                        format!("{}...", truncated)
                     } else {
                         l.to_string()
                     }
@@ -2968,6 +3016,31 @@ SAFETY NOTES:
 
         table
     }
+
+    #[tool(
+        description = "Ask the user one or more questions with predefined options. Use this when you need user input to make decisions or gather preferences.
+
+WHEN TO USE:
+- When you need to clarify requirements before proceeding
+- When there are multiple valid approaches and user preference matters
+- When confirming / gathering information
+- It's easier / faster for the user than prompting them for a full text response
+"
+    )]
+    pub async fn ask_user(
+        &self,
+        _ctx: RequestContext<RoleServer>,
+        Parameters(_request): Parameters<AskUserRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // This tool is handled specially by the TUI - it should never reach here
+        // If it does, return an error indicating the tool requires interactive mode
+        Ok(CallToolResult::error(vec![
+            Content::text("INTERACTIVE_REQUIRED"),
+            Content::text(
+                "The ask_user tool requires interactive mode. It cannot be used in headless/async execution.",
+            ),
+        ]))
+    }
 }
 
 /// Normalize a single character: map common Unicode "fancy" characters to their
@@ -3093,6 +3166,7 @@ impl NormalizedWithMapping {
 ///
 /// Uses Rust's built-in [`str::find`] (Two-Way algorithm) for O(n + m)
 /// substring search instead of a naive O(n × m) character-by-character scan.
+#[allow(clippy::string_slice)] // all indices from find() on normalized text + orig_byte_at() which maps to char_indices() boundaries
 fn unicode_normalized_replace(
     content: &str,
     old_str: &str,
@@ -3174,6 +3248,28 @@ fn unicode_normalized_replace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_command_request_empty_remote_is_none() {
+        let request: RunCommandRequest = serde_json::from_value(serde_json::json!({
+            "command": "echo hello",
+            "remote": "   "
+        }))
+        .expect("run command request should deserialize");
+
+        assert!(request.remote.is_none());
+    }
+
+    #[test]
+    fn run_command_request_password_preserves_whitespace() {
+        let request: RunCommandRequest = serde_json::from_value(serde_json::json!({
+            "command": "echo hello",
+            "password": "  pass with spaces  "
+        }))
+        .expect("run command request should deserialize");
+
+        assert_eq!(request.password.as_deref(), Some("  pass with spaces  "));
+    }
 
     // ---------------------------------------------------------------
     // normalize_unicode_char / normalize_unicode_to_ascii

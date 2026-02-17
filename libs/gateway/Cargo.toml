@@ -28,10 +28,7 @@ axum = { workspace = true }
 tracing = { workspace = true }
 bytes = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-
-[dev-dependencies]
 tempfile = { workspace = true }
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true

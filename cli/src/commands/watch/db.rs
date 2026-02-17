@@ -1,13 +1,12 @@
-//! SQLite database layer for watch state and trigger run history.
+//! SQLite database layer for autopilot state and schedule run history.
 //!
 //! Uses libsql for async SQLite operations.
 
 use chrono::{DateTime, Utc};
-use libsql::Connection;
+use libsql::{Connection, Database};
 use std::path::Path;
-use tokio::sync::Mutex;
 
-/// Run status for trigger executions.
+/// Run status for schedule executions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     /// Currently executing
@@ -53,11 +52,11 @@ impl std::str::FromStr for RunStatus {
     }
 }
 
-/// A trigger run record.
+/// A schedule run record.
 #[derive(Debug, Clone)]
-pub struct TriggerRun {
+pub struct ScheduleRun {
     pub id: i64,
-    pub trigger_name: String,
+    pub schedule_name: String,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub check_exit_code: Option<i32>,
@@ -76,7 +75,7 @@ pub struct TriggerRun {
 
 /// Watch state record.
 #[derive(Debug, Clone)]
-pub struct WatchState {
+pub struct SchedulerState {
     pub started_at: DateTime<Utc>,
     pub pid: i64,
     pub last_heartbeat: DateTime<Utc>,
@@ -85,17 +84,17 @@ pub struct WatchState {
 /// Filter options for listing runs.
 #[derive(Debug, Default)]
 pub struct ListRunsFilter {
-    pub trigger_name: Option<String>,
+    pub schedule_name: Option<String>,
     pub status: Option<RunStatus>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
 
-/// A pending trigger request (for manual trigger fires).
+/// A pending schedule request (for manual schedule fires).
 #[derive(Debug, Clone)]
-pub struct PendingTrigger {
+pub struct PendingSchedule {
     pub id: i64,
-    pub trigger_name: String,
+    pub schedule_name: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -113,11 +112,12 @@ pub enum DbError {
 }
 
 /// Watch database storage.
-pub struct WatchDb {
-    conn: Mutex<Connection>,
+pub struct ScheduleDb {
+    /// Keep the libsql Database handle alive for the lifetime of each operation connection.
+    db: Database,
 }
 
-impl WatchDb {
+impl ScheduleDb {
     /// Create a new database instance, initializing schema if needed.
     pub async fn new(db_path: &str) -> Result<Self, DbError> {
         // Ensure parent directory exists
@@ -132,21 +132,21 @@ impl WatchDb {
             .await
             .map_err(|e| DbError::Connection(format!("Failed to open database: {}", e)))?;
 
-        let conn = db
-            .connect()
-            .map_err(|e| DbError::Connection(format!("Failed to connect to database: {}", e)))?;
-
-        let storage = Self {
-            conn: Mutex::new(conn),
-        };
+        let storage = Self { db };
         storage.init_schema().await?;
 
         Ok(storage)
     }
 
+    fn connection(&self) -> Result<Connection, DbError> {
+        self.db
+            .connect()
+            .map_err(|e| DbError::Connection(format!("Failed to connect to database: {}", e)))
+    }
+
     /// Initialize database schema.
     async fn init_schema(&self) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         // Create trigger_runs table
         conn.execute(
@@ -181,9 +181,9 @@ impl WatchDb {
             .execute("ALTER TABLE trigger_runs ADD COLUMN agent_stderr TEXT", ())
             .await;
 
-        // Create watch_state table (singleton)
+        // Create autopilot_state table (singleton)
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS watch_state (
+            "CREATE TABLE IF NOT EXISTS autopilot_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 started_at TEXT,
                 pid INTEGER,
@@ -231,15 +231,38 @@ impl WatchDb {
         Ok(())
     }
 
-    /// Insert a new trigger run, returning the run ID.
-    pub async fn insert_run(&self, trigger_name: &str) -> Result<i64, DbError> {
-        let conn = self.conn.lock().await;
+    /// Check if a schedule already has a run in "running" status.
+    pub async fn has_running_run(&self, schedule_name: &str) -> Result<bool, DbError> {
+        let conn = self.connection()?;
+        let status = RunStatus::Running.to_string();
+
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM trigger_runs WHERE trigger_name = ? AND status = ?",
+                (schedule_name, status.as_str()),
+            )
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?
+            .ok_or_else(|| DbError::NotFound("count query returned no rows".to_string()))?;
+
+        let count: i64 = row.get(0).map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(count > 0)
+    }
+
+    /// Insert a new schedule run, returning the run ID.
+    pub async fn insert_run(&self, schedule_name: &str) -> Result<i64, DbError> {
+        let conn = self.connection()?;
         let now = Utc::now().to_rfc3339();
         let status = RunStatus::Running.to_string();
 
         conn.execute(
             "INSERT INTO trigger_runs (trigger_name, started_at, status, created_at) VALUES (?, ?, ?, ?)",
-            (trigger_name, now.as_str(), status.as_str(), now.as_str()),
+            (schedule_name, now.as_str(), status.as_str(), now.as_str()),
         )
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
@@ -267,7 +290,7 @@ impl WatchDb {
         stderr: &str,
         timed_out: bool,
     ) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         conn.execute(
             "UPDATE trigger_runs SET check_exit_code = ?, check_stdout = ?, check_stderr = ?, check_timed_out = ? WHERE id = ?",
@@ -285,7 +308,7 @@ impl WatchDb {
         run_id: i64,
         session_id: &str,
     ) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         conn.execute(
             "UPDATE trigger_runs SET agent_woken = 1, agent_session_id = ? WHERE id = ?",
@@ -303,7 +326,7 @@ impl WatchDb {
         run_id: i64,
         checkpoint_id: &str,
     ) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         conn.execute(
             "UPDATE trigger_runs SET agent_last_checkpoint_id = ? WHERE id = ?",
@@ -324,7 +347,7 @@ impl WatchDb {
         agent_stdout: Option<&str>,
         agent_stderr: Option<&str>,
     ) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let now = Utc::now().to_rfc3339();
         let status_str = status.to_string();
 
@@ -339,8 +362,8 @@ impl WatchDb {
     }
 
     /// Get a run by ID.
-    pub async fn get_run(&self, run_id: i64) -> Result<TriggerRun, DbError> {
-        let conn = self.conn.lock().await;
+    pub async fn get_run(&self, run_id: i64) -> Result<ScheduleRun, DbError> {
+        let conn = self.connection()?;
 
         let mut rows = conn
             .query(
@@ -354,15 +377,15 @@ impl WatchDb {
             .map_err(|e| DbError::Query(e.to_string()))?;
 
         if let Ok(Some(row)) = rows.next().await {
-            parse_trigger_run(&row)
+            parse_schedule_run(&row)
         } else {
             Err(DbError::NotFound(format!("Run {} not found", run_id)))
         }
     }
 
     /// List runs with optional filters.
-    pub async fn list_runs(&self, filter: &ListRunsFilter) -> Result<Vec<TriggerRun>, DbError> {
-        let conn = self.conn.lock().await;
+    pub async fn list_runs(&self, filter: &ListRunsFilter) -> Result<Vec<ScheduleRun>, DbError> {
+        let conn = self.connection()?;
 
         let mut sql =
             "SELECT id, trigger_name, started_at, finished_at, check_exit_code, check_stdout,
@@ -373,7 +396,7 @@ impl WatchDb {
 
         let mut params: Vec<String> = Vec::new();
 
-        if let Some(name) = &filter.trigger_name {
+        if let Some(name) = &filter.schedule_name {
             sql.push_str(" AND trigger_name = ?");
             params.push(name.clone());
         }
@@ -407,7 +430,7 @@ impl WatchDb {
 
         let mut runs = Vec::new();
         while let Ok(Some(row)) = rows.next().await {
-            runs.push(parse_trigger_run(&row)?);
+            runs.push(parse_schedule_run(&row)?);
         }
 
         Ok(runs)
@@ -415,7 +438,7 @@ impl WatchDb {
 
     /// Delete runs older than the specified number of days.
     pub async fn prune_runs(&self, older_than_days: u32) -> Result<u64, DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         let result = conn
             .execute(
@@ -428,13 +451,30 @@ impl WatchDb {
         Ok(result)
     }
 
-    /// Set watch state (upsert).
-    pub async fn set_watch_state(&self, pid: i64) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+    /// Mark all stale "running" runs as failed.
+    /// Runs are considered stale if they've been running and the autopilot service is no longer active.
+    pub async fn clean_stale_runs(&self) -> Result<u64, DbError> {
+        let conn = self.connection()?;
+        let now = Utc::now().to_rfc3339();
+
+        let result = conn
+            .execute(
+                "UPDATE trigger_runs SET status = 'failed', finished_at = ?, error_message = 'Marked as failed: autopilot was stopped while run was in progress' WHERE status = 'running'",
+                [now.as_str()],
+            )
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        Ok(result)
+    }
+
+    /// Set autopilot state (upsert).
+    pub async fn set_autopilot_state(&self, pid: i64) -> Result<(), DbError> {
+        let conn = self.connection()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT OR REPLACE INTO watch_state (id, started_at, pid, last_heartbeat) VALUES (1, ?, ?, ?)",
+            "INSERT OR REPLACE INTO autopilot_state (id, started_at, pid, last_heartbeat) VALUES (1, ?, ?, ?)",
             (now.as_str(), pid, now.as_str()),
         )
         .await
@@ -443,13 +483,13 @@ impl WatchDb {
         Ok(())
     }
 
-    /// Update watch heartbeat.
+    /// Update autopilot heartbeat.
     pub async fn update_heartbeat(&self) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            "UPDATE watch_state SET last_heartbeat = ? WHERE id = 1",
+            "UPDATE autopilot_state SET last_heartbeat = ? WHERE id = 1",
             [now.as_str()],
         )
         .await
@@ -458,13 +498,13 @@ impl WatchDb {
         Ok(())
     }
 
-    /// Get watch state.
-    pub async fn get_watch_state(&self) -> Result<Option<WatchState>, DbError> {
-        let conn = self.conn.lock().await;
+    /// Get autopilot state.
+    pub async fn get_autopilot_state(&self) -> Result<Option<SchedulerState>, DbError> {
+        let conn = self.connection()?;
 
         let mut rows = conn
             .query(
-                "SELECT started_at, pid, last_heartbeat FROM watch_state WHERE id = 1",
+                "SELECT started_at, pid, last_heartbeat FROM autopilot_state WHERE id = 1",
                 (),
             )
             .await
@@ -475,7 +515,7 @@ impl WatchDb {
             let pid: i64 = row.get(1).map_err(|e| DbError::Query(e.to_string()))?;
             let last_heartbeat: String = row.get(2).map_err(|e| DbError::Query(e.to_string()))?;
 
-            Ok(Some(WatchState {
+            Ok(Some(SchedulerState {
                 started_at: parse_datetime(&started_at)?,
                 pid,
                 last_heartbeat: parse_datetime(&last_heartbeat)?,
@@ -485,25 +525,25 @@ impl WatchDb {
         }
     }
 
-    /// Clear watch state.
-    pub async fn clear_watch_state(&self) -> Result<(), DbError> {
-        let conn = self.conn.lock().await;
+    /// Clear autopilot state.
+    pub async fn clear_autopilot_state(&self) -> Result<(), DbError> {
+        let conn = self.connection()?;
 
-        conn.execute("DELETE FROM watch_state WHERE id = 1", ())
+        conn.execute("DELETE FROM autopilot_state WHERE id = 1", ())
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
         Ok(())
     }
 
-    /// Insert a pending trigger request (for manual trigger fires).
-    pub async fn insert_pending_trigger(&self, trigger_name: &str) -> Result<i64, DbError> {
-        let conn = self.conn.lock().await;
+    /// Insert a pending schedule request (for manual schedule fires).
+    pub async fn insert_pending_schedule(&self, schedule_name: &str) -> Result<i64, DbError> {
+        let conn = self.connection()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
             "INSERT INTO pending_triggers (trigger_name, created_at) VALUES (?, ?)",
-            (trigger_name, now.as_str()),
+            (schedule_name, now.as_str()),
         )
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
@@ -522,47 +562,56 @@ impl WatchDb {
         }
     }
 
-    /// Get and delete all pending triggers (atomic pop).
-    pub async fn pop_pending_triggers(&self) -> Result<Vec<PendingTrigger>, DbError> {
-        let conn = self.conn.lock().await;
+    /// Get and delete all pending schedules (atomic pop).
+    pub async fn pop_pending_schedules(&self) -> Result<Vec<PendingSchedule>, DbError> {
+        let conn = self.connection()?;
 
-        // Get all pending triggers
         let mut rows = conn
             .query(
-                "SELECT id, trigger_name, created_at FROM pending_triggers ORDER BY created_at ASC",
+                "DELETE FROM pending_triggers
+                 WHERE id IN (
+                     SELECT id FROM pending_triggers ORDER BY created_at ASC
+                 )
+                 RETURNING id, trigger_name, created_at",
                 (),
             )
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
 
-        let mut triggers = Vec::new();
+        let mut schedules = Vec::new();
         while let Ok(Some(row)) = rows.next().await {
-            let id: i64 = row.get(0).map_err(|e| DbError::Query(e.to_string()))?;
-            let trigger_name: String = row.get(1).map_err(|e| DbError::Query(e.to_string()))?;
-            let created_at: String = row.get(2).map_err(|e| DbError::Query(e.to_string()))?;
+            let id: i64 = match row.get(0) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let schedule_name: String = match row.get(1) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let created_at_raw: String = match row.get(2) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
 
-            triggers.push(PendingTrigger {
+            let created_at = parse_datetime(&created_at_raw).unwrap_or_else(|_| Utc::now());
+
+            schedules.push(PendingSchedule {
                 id,
-                trigger_name,
-                created_at: parse_datetime(&created_at)?,
+                schedule_name,
+                created_at,
             });
         }
 
-        // Delete all pending triggers we just read
-        if !triggers.is_empty() {
-            conn.execute("DELETE FROM pending_triggers", ())
-                .await
-                .map_err(|e| DbError::Query(e.to_string()))?;
-        }
+        schedules.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-        Ok(triggers)
+        Ok(schedules)
     }
 }
 
-/// Parse a row into a TriggerRun.
-fn parse_trigger_run(row: &libsql::Row) -> Result<TriggerRun, DbError> {
+/// Parse a row into a ScheduleRun.
+fn parse_schedule_run(row: &libsql::Row) -> Result<ScheduleRun, DbError> {
     let id: i64 = row.get(0).map_err(|e| DbError::Query(e.to_string()))?;
-    let trigger_name: String = row.get(1).map_err(|e| DbError::Query(e.to_string()))?;
+    let schedule_name: String = row.get(1).map_err(|e| DbError::Query(e.to_string()))?;
     let started_at: String = row.get(2).map_err(|e| DbError::Query(e.to_string()))?;
     let finished_at: Option<String> = row.get(3).ok();
     let check_exit_code: Option<i32> = row.get(4).ok();
@@ -578,9 +627,9 @@ fn parse_trigger_run(row: &libsql::Row) -> Result<TriggerRun, DbError> {
     let error_message: Option<String> = row.get(14).ok();
     let created_at: String = row.get(15).map_err(|e| DbError::Query(e.to_string()))?;
 
-    Ok(TriggerRun {
+    Ok(ScheduleRun {
         id,
-        trigger_name,
+        schedule_name,
         started_at: parse_datetime(&started_at)?,
         finished_at: finished_at.map(|s| parse_datetime(&s)).transpose()?,
         check_exit_code,
@@ -614,10 +663,10 @@ mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
 
-    async fn create_test_db() -> (WatchDb, TempDir) {
+    async fn create_test_db() -> (ScheduleDb, TempDir) {
         let dir = tempdir().expect("Failed to create temp dir");
         let db_path = dir.path().join("test.db");
-        let db = WatchDb::new(db_path.to_str().expect("Invalid path"))
+        let db = ScheduleDb::new(db_path.to_str().expect("Invalid path"))
             .await
             .expect("Failed to create test db");
         (db, dir)
@@ -628,16 +677,16 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp dir");
         let db_path = dir.path().join("test.db");
 
-        let db = WatchDb::new(db_path.to_str().expect("Invalid path"))
+        let db = ScheduleDb::new(db_path.to_str().expect("Invalid path"))
             .await
             .expect("Failed to create db");
 
         // Verify tables exist by querying them
-        let conn = db.conn.lock().await;
+        let conn = db.connection().expect("Failed to open connection");
 
         let mut rows = conn
             .query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('trigger_runs', 'watch_state')",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('trigger_runs', 'autopilot_state')",
                 (),
             )
             .await
@@ -650,19 +699,19 @@ mod tests {
         }
 
         assert!(tables.contains(&"trigger_runs".to_string()));
-        assert!(tables.contains(&"watch_state".to_string()));
+        assert!(tables.contains(&"autopilot_state".to_string()));
     }
 
     #[tokio::test]
     async fn test_insert_and_get_run() {
         let (db, _dir) = create_test_db().await;
 
-        let run_id = db.insert_run("test-trigger").await.expect("Insert failed");
+        let run_id = db.insert_run("test-schedule").await.expect("Insert failed");
         assert!(run_id > 0);
 
         let run = db.get_run(run_id).await.expect("Get failed");
         assert_eq!(run.id, run_id);
-        assert_eq!(run.trigger_name, "test-trigger");
+        assert_eq!(run.schedule_name, "test-schedule");
         assert_eq!(run.status, RunStatus::Running);
         assert!(!run.agent_woken);
     }
@@ -671,7 +720,7 @@ mod tests {
     async fn test_update_run_status() {
         let (db, _dir) = create_test_db().await;
 
-        let run_id = db.insert_run("test-trigger").await.expect("Insert failed");
+        let run_id = db.insert_run("test-schedule").await.expect("Insert failed");
 
         // Update check result
         db.update_run_check_result(run_id, 0, "output", "errors", false)
@@ -719,9 +768,9 @@ mod tests {
         let (db, _dir) = create_test_db().await;
 
         // Insert multiple runs
-        let id1 = db.insert_run("trigger-a").await.expect("Insert failed");
-        let _id2 = db.insert_run("trigger-b").await.expect("Insert failed");
-        let _id3 = db.insert_run("trigger-a").await.expect("Insert failed");
+        let id1 = db.insert_run("schedule-a").await.expect("Insert failed");
+        let _id2 = db.insert_run("schedule-b").await.expect("Insert failed");
+        let _id3 = db.insert_run("schedule-a").await.expect("Insert failed");
 
         // Mark one as completed
         db.update_run_finished(id1, RunStatus::Completed, None, None, None)
@@ -735,10 +784,10 @@ mod tests {
             .expect("List failed");
         assert_eq!(runs.len(), 3);
 
-        // Filter by trigger name
+        // Filter by schedule name
         let runs = db
             .list_runs(&ListRunsFilter {
-                trigger_name: Some("trigger-a".to_string()),
+                schedule_name: Some("schedule-a".to_string()),
                 ..Default::default()
             })
             .await
@@ -771,7 +820,7 @@ mod tests {
         let (db, _dir) = create_test_db().await;
 
         // Insert a run
-        db.insert_run("test-trigger").await.expect("Insert failed");
+        db.insert_run("test-schedule").await.expect("Insert failed");
 
         // Prune runs older than 0 days (should delete the run we just created)
         // Note: This test is a bit tricky because the run was just created
@@ -782,18 +831,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watch_state_lifecycle() {
+    async fn test_autopilot_state_lifecycle() {
         let (db, _dir) = create_test_db().await;
 
         // Initially no state
-        let state = db.get_watch_state().await.expect("Get state failed");
+        let state = db.get_autopilot_state().await.expect("Get state failed");
         assert!(state.is_none());
 
         // Set state
-        db.set_watch_state(12345).await.expect("Set state failed");
+        db.set_autopilot_state(12345)
+            .await
+            .expect("Set state failed");
 
         let state = db
-            .get_watch_state()
+            .get_autopilot_state()
             .await
             .expect("Get state failed")
             .expect("State should exist");
@@ -806,16 +857,18 @@ mod tests {
             .expect("Update heartbeat failed");
 
         let state2 = db
-            .get_watch_state()
+            .get_autopilot_state()
             .await
             .expect("Get state failed")
             .expect("State should exist");
         assert!(state2.last_heartbeat >= state.last_heartbeat);
 
         // Clear state
-        db.clear_watch_state().await.expect("Clear state failed");
+        db.clear_autopilot_state()
+            .await
+            .expect("Clear state failed");
 
-        let state = db.get_watch_state().await.expect("Get state failed");
+        let state = db.get_autopilot_state().await.expect("Get state failed");
         assert!(state.is_none());
     }
 
@@ -835,33 +888,40 @@ mod tests {
         assert_eq!(RunStatus::Skipped.to_string(), "skipped");
         assert_eq!(RunStatus::TimedOut.to_string(), "timed_out");
 
-        assert_eq!("running".parse::<RunStatus>().unwrap(), RunStatus::Running);
         assert_eq!(
-            "COMPLETED".parse::<RunStatus>().unwrap(),
+            "running"
+                .parse::<RunStatus>()
+                .expect("failed to parse running status"),
+            RunStatus::Running
+        );
+        assert_eq!(
+            "COMPLETED"
+                .parse::<RunStatus>()
+                .expect("failed to parse completed status"),
             RunStatus::Completed
         );
         assert!("invalid".parse::<RunStatus>().is_err());
     }
 
     #[tokio::test]
-    async fn test_pending_triggers() {
+    async fn test_pending_schedules() {
         let (db, _dir) = create_test_db().await;
 
-        // Initially no pending triggers
-        let pending = db.pop_pending_triggers().await.expect("Pop failed");
+        // Initially no pending schedules
+        let pending = db.pop_pending_schedules().await.expect("Pop failed");
         assert!(pending.is_empty());
 
-        // Insert some pending triggers
+        // Insert some pending schedules
         let id1 = db
-            .insert_pending_trigger("trigger-a")
+            .insert_pending_schedule("schedule-a")
             .await
             .expect("Insert failed");
         let id2 = db
-            .insert_pending_trigger("trigger-b")
+            .insert_pending_schedule("schedule-b")
             .await
             .expect("Insert failed");
         let id3 = db
-            .insert_pending_trigger("trigger-a")
+            .insert_pending_schedule("schedule-a")
             .await
             .expect("Insert failed");
 
@@ -870,14 +930,31 @@ mod tests {
         assert!(id3 > id2);
 
         // Pop should return all and delete them
-        let pending = db.pop_pending_triggers().await.expect("Pop failed");
+        let pending = db.pop_pending_schedules().await.expect("Pop failed");
         assert_eq!(pending.len(), 3);
-        assert_eq!(pending[0].trigger_name, "trigger-a");
-        assert_eq!(pending[1].trigger_name, "trigger-b");
-        assert_eq!(pending[2].trigger_name, "trigger-a");
+        assert_eq!(pending[0].schedule_name, "schedule-a");
+        assert_eq!(pending[1].schedule_name, "schedule-b");
+        assert_eq!(pending[2].schedule_name, "schedule-a");
 
         // Second pop should return empty
-        let pending = db.pop_pending_triggers().await.expect("Pop failed");
+        let pending = db.pop_pending_schedules().await.expect("Pop failed");
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pending_schedules_tolerates_malformed_created_at() {
+        let (db, _dir) = create_test_db().await;
+        let conn = db.connection().expect("Failed to open connection");
+
+        conn.execute(
+            "INSERT INTO pending_triggers (trigger_name, created_at) VALUES (?, ?)",
+            ("schedule-a", "not-a-timestamp"),
+        )
+        .await
+        .expect("insert malformed pending trigger failed");
+
+        let pending = db.pop_pending_schedules().await.expect("Pop failed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].schedule_name, "schedule-a");
     }
 }
