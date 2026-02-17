@@ -6,23 +6,20 @@
 //! Design:
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────┐
-//! │ ← □ Visibility   □ Enrollment   ✓ Payment   □ Coach Access   ✓ Submit →         │
+//! │ ← □ Visibility   □ Enrollment   ✓ Payment   □ Coach Access   Review →           │
 //! ├─────────────────────────────────────────────────────────────────────────────────┤
 //! │                                                                                 │
 //! │ Should academies be public by default (visible to all users), or should they   │
 //! │ require admin approval before being listed?                                     │
 //! │                                                                                 │
-//! │ › 1. Public by default                                                          │
-//! │      Academies are visible immediately after creation                           │
-//! │                                                                                 │
-//! │   2. Require approval                                                           │
-//! │      Admin must approve before academy appears in listings                      │
-//! │                                                                                 │
-//! │   3. Type something...                                                          │
-//! │      [Custom input field when selected]                                         │
+//! │ [>] Public by default                                                           │
+//! │     Academies are visible immediately after creation                            │
+//! │ [2] Require approval                                                            │
+//! │     Admin must approve before academy appears in listings                       │
+//! │ [3] Other... Type your answer...│                                               │
 //! │                                                                                 │
 //! ├─────────────────────────────────────────────────────────────────────────────────┤
-//! │ Enter to select · Tab/Arrow keys to navigate · Esc to cancel                    │
+//! │ Enter to select · ↑/↓ options · ←/→ questions · 1-9 quick select · Esc cancel  │
 //! └─────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -42,10 +39,15 @@ pub fn calculate_ask_user_height(state: &AppState, terminal_width: u16) -> u16 {
         return 0;
     }
 
-    // If we're on the Submit tab, show a minimal height
+    // If we're on the Submit tab, calculate based on question count
     if state.ask_user_current_tab >= state.ask_user_questions.len() {
-        // Tab bar (1) + border (1) + submit message (3) + help (1) + border (1)
-        return 7;
+        // Tab bar (1) + border (1) + empty (1)
+        // + per question: label (1) + answer (1) + spacing (1) = 3 each
+        // + submit button (1) + help (1) + border (1)
+        let question_lines = state.ask_user_questions.len() * 3;
+        let total = 1 + 1 + 1 + question_lines + 1 + 1 + 1;
+        let max_height = (terminal_width as f32 * 0.6) as u16;
+        return (total as u16).min(max_height).max(10);
     }
 
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
@@ -63,17 +65,8 @@ pub fn calculate_ask_user_height(state: &AppState, terminal_width: u16) -> u16 {
         }
     }
 
-    // Custom input option (if allowed): 1 for "Type something...", 1 for input field when selected
-    let custom_lines = if current_q.allow_custom {
-        let custom_idx = current_q.options.len();
-        if state.ask_user_selected_option == custom_idx {
-            2 // "Type something..." + input field
-        } else {
-            1 // just "Type something..."
-        }
-    } else {
-        0
-    };
+    // Custom input option (if allowed): always 1 line (inline)
+    let custom_lines = if current_q.allow_custom { 1 } else { 0 };
 
     // Height calculation:
     // - Tab bar: 1
@@ -152,7 +145,7 @@ fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
 
     for (i, q) in state.ask_user_questions.iter().enumerate() {
         let is_current = i == state.ask_user_current_tab;
-        let is_answered = state.ask_user_answers.contains_key(&q.id);
+        let is_answered = state.ask_user_answers.contains_key(&q.label);
 
         let checkbox = if is_answered { "✓ " } else { "□ " };
 
@@ -187,7 +180,7 @@ fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    spans.push(Span::styled("✓ Submit", submit_style));
+    spans.push(Span::styled("Review", submit_style));
 
     // Right arrow
     spans.push(Span::styled(" →", Style::default().fg(Color::DarkGray)));
@@ -201,7 +194,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
     let mut lines = vec![];
 
     // Check if this question has a previous answer
-    let previous_answer = state.ask_user_answers.get(&q.id);
+    let previous_answer = state.ask_user_answers.get(&q.label);
 
     // Empty line for spacing
     lines.push(Line::from(""));
@@ -227,89 +220,120 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
             .map(|a| !a.is_custom && a.answer == opt.value)
             .unwrap_or(false);
 
-        let prefix = if is_selected {
-            "› "
-        } else if is_answered {
-            "✓ "
+        let (bracket, bracket_style) = if is_answered {
+            (
+                "[✓]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if is_selected {
+            (
+                "[>]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            "  "
+            (
+                &*format!("[{}]", i + 1),
+                Style::default().fg(Color::DarkGray),
+            )
         };
-        let num = format!("{}. ", i + 1);
 
-        let style = if is_selected {
+        let label_style = if is_answered {
+            Style::default().fg(Color::Cyan)
+        } else if is_selected {
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
-        } else if is_answered {
-            Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
+        // Need to own the formatted string for the numbered case
+        let bracket_owned = bracket.to_string();
         lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(num, style),
-            Span::styled(&opt.label, style),
+            Span::styled(bracket_owned, bracket_style),
+            Span::raw(" "),
+            Span::styled(&opt.label, label_style),
         ]));
 
         if let Some(desc) = &opt.description {
-            let desc_style = if is_selected {
+            let desc_style = if is_selected || is_answered {
                 Style::default().fg(Color::Gray)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
             lines.push(Line::from(Span::styled(
-                format!("     {}", desc),
+                format!("    {}", desc),
                 desc_style,
             )));
         }
     }
 
-    // Custom input option (if allowed)
+    // Custom input option (if allowed) — inline with placeholder
     if q.allow_custom {
         let custom_idx = q.options.len();
         let is_selected = state.ask_user_selected_option == custom_idx;
         let is_custom_answered = previous_answer.map(|a| a.is_custom).unwrap_or(false);
 
-        let prefix = if is_selected {
-            "› "
-        } else if is_custom_answered {
-            "✓ "
+        let (bracket, bracket_style) = if is_custom_answered {
+            (
+                "[✓]".to_string(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if is_selected {
+            (
+                "[>]".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            "  "
-        };
-        let num = format!("{}. ", custom_idx + 1);
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else if is_custom_answered {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
+            (
+                format!("[{}]", custom_idx + 1),
+                Style::default().fg(Color::DarkGray),
+            )
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(num, style),
-            Span::styled("Type something...", style),
-        ]));
-
-        // Show input field when custom option is selected OR show previous custom answer
         if is_selected {
-            lines.push(Line::from(vec![
-                Span::raw("     "),
-                Span::styled(
-                    &state.ask_user_custom_input,
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled("│", Style::default().fg(Color::Cyan)),
-            ]));
+            // Active input: bracket + cursor + typed text (or placeholder)
+            if state.ask_user_custom_input.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(bracket, bracket_style),
+                    Span::raw(" "),
+                    Span::styled("│", Style::default().fg(Color::Cyan)),
+                    Span::styled("Type your answer...", Style::default().fg(Color::DarkGray)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(bracket, bracket_style),
+                    Span::raw(" "),
+                    Span::styled(
+                        &state.ask_user_custom_input,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("│", Style::default().fg(Color::Cyan)),
+                ]));
+            }
         } else if is_custom_answered && let Some(answer) = previous_answer {
+            // Answered custom: bracket + the answer text
             lines.push(Line::from(vec![
-                Span::raw("     "),
+                Span::styled(bracket, bracket_style),
+                Span::raw(" "),
                 Span::styled(&answer.answer, Style::default().fg(Color::Cyan)),
+            ]));
+        } else {
+            // Inactive: bracket + placeholder
+            lines.push(Line::from(vec![
+                Span::styled(bracket, bracket_style),
+                Span::raw(" "),
+                Span::styled("Other...", Style::default().fg(Color::DarkGray)),
             ]));
         }
     }
@@ -317,78 +341,79 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Render the submit tab content
+/// Render the submit tab content — full Q&A summary
 fn render_submit_content(f: &mut Frame, state: &AppState, area: Rect) {
     let mut lines = vec![];
+    let all_required_answered = check_all_required_answered(state);
+    let inner_width = area.width as usize;
 
     lines.push(Line::from(""));
 
-    let all_required_answered = check_all_required_answered(state);
+    // Show each question with its answer (or missing marker)
+    for q in &state.ask_user_questions {
+        // Question label
+        let label_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let required_marker = if q.required { " *" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(&q.label, label_style),
+            Span::styled(required_marker, Style::default().fg(Color::Red)),
+        ]));
 
-    if all_required_answered {
-        lines.push(Line::from(Span::styled(
-            "Ready to submit your answers!",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Press Enter to confirm and send your responses.",
-            Style::default().fg(Color::White),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Some required questions are not answered yet.",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
+        // Answer or missing
+        if let Some(answer) = state.ask_user_answers.get(&q.label) {
+            // Find the display label for the selected option
+            let display = if answer.is_custom {
+                answer.answer.clone()
+            } else {
+                q.options
+                    .iter()
+                    .find(|o| o.value == answer.answer)
+                    .map(|o| o.label.clone())
+                    .unwrap_or_else(|| answer.answer.clone())
+            };
 
-        // List unanswered required questions
-        for q in &state.ask_user_questions {
-            if q.required && !state.ask_user_answers.contains_key(&q.id) {
-                lines.push(Line::from(vec![
-                    Span::styled("  □ ", Style::default().fg(Color::Yellow)),
-                    Span::styled(&q.label, Style::default().fg(Color::White)),
-                ]));
-            }
+            // Truncate to available width (char-safe)
+            let max_display = inner_width.saturating_sub(4); // "  " prefix
+            let display = if display.chars().count() > max_display {
+                format!(
+                    "{}…",
+                    display
+                        .chars()
+                        .take(max_display.saturating_sub(1))
+                        .collect::<String>()
+                )
+            } else {
+                display
+            };
+
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(display, Style::default().fg(Color::Cyan)),
+            ]));
+        } else if q.required {
+            lines.push(Line::from(vec![
+                Span::styled("  □ ", Style::default().fg(Color::Yellow)),
+                Span::styled("not answered", Style::default().fg(Color::Yellow)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("  — ", Style::default().fg(Color::DarkGray)),
+                Span::styled("skipped", Style::default().fg(Color::DarkGray)),
+            ]));
         }
+
+        // Spacing between questions
+        lines.push(Line::from(""));
     }
 
-    // Summary of answers
-    if !state.ask_user_answers.is_empty() {
-        lines.push(Line::from(""));
+    // Show warning if not all required questions are answered
+    if !all_required_answered {
         lines.push(Line::from(Span::styled(
-            "Your answers:",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "  Answer all required (*) questions to submit",
+            Style::default().fg(Color::Yellow),
         )));
-
-        for q in &state.ask_user_questions {
-            if let Some(answer) = state.ask_user_answers.get(&q.id) {
-                // Truncate answer display (char-safe for UTF-8)
-                let answer_display = if answer.answer.chars().count() > 40 {
-                    format!("{}...", answer.answer.chars().take(37).collect::<String>())
-                } else {
-                    answer.answer.clone()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled("  ✓ ", Style::default().fg(Color::Green)),
-                    Span::styled(format!("{}: ", q.label), Style::default().fg(Color::White)),
-                    Span::styled(
-                        answer_display,
-                        Style::default().fg(if answer.is_custom {
-                            Color::Magenta
-                        } else {
-                            Color::Cyan
-                        }),
-                    ),
-                ]));
-            }
-        }
     }
 
     f.render_widget(Paragraph::new(lines), area);
@@ -467,7 +492,7 @@ fn check_all_required_answered(state: &AppState) -> bool {
         .ask_user_questions
         .iter()
         .filter(|q| q.required)
-        .all(|q| state.ask_user_answers.contains_key(&q.id))
+        .all(|q| state.ask_user_answers.contains_key(&q.label))
 }
 
 /// Get the total number of options for the current question (including custom if allowed)

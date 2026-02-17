@@ -41,9 +41,7 @@ pub fn handle_ask_user_next_tab(state: &mut AppState) {
     let max_tab = state.ask_user_questions.len(); // questions.len() is the Submit tab
     if state.ask_user_current_tab < max_tab {
         state.ask_user_current_tab += 1;
-        // Reset option selection when changing tabs
-        state.ask_user_selected_option = 0;
-        state.ask_user_custom_input.clear();
+        restore_selection_for_current_tab(state);
     }
 }
 
@@ -55,9 +53,37 @@ pub fn handle_ask_user_prev_tab(state: &mut AppState) {
 
     if state.ask_user_current_tab > 0 {
         state.ask_user_current_tab -= 1;
-        // Reset option selection when changing tabs
+        restore_selection_for_current_tab(state);
+    }
+}
+
+/// Restore the cursor position when navigating back to a question tab.
+///
+/// If the question was previously answered, place the cursor on the answered
+/// option so the `›` indicator doesn't hide the selection. Otherwise reset to 0.
+fn restore_selection_for_current_tab(state: &mut AppState) {
+    state.ask_user_custom_input.clear();
+
+    // Submit tab — nothing to restore
+    if state.ask_user_current_tab >= state.ask_user_questions.len() {
         state.ask_user_selected_option = 0;
-        state.ask_user_custom_input.clear();
+        return;
+    }
+
+    let q = &state.ask_user_questions[state.ask_user_current_tab];
+
+    if let Some(answer) = state.ask_user_answers.get(&q.label) {
+        if answer.is_custom {
+            // Custom answer — point to the custom input slot
+            state.ask_user_selected_option = q.options.len();
+            state.ask_user_custom_input.clone_from(&answer.answer);
+        } else if let Some(idx) = q.options.iter().position(|o| o.value == answer.answer) {
+            state.ask_user_selected_option = idx;
+        } else {
+            state.ask_user_selected_option = 0;
+        }
+    } else {
+        state.ask_user_selected_option = 0;
     }
 }
 
@@ -109,18 +135,20 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
     }
 
     let current_q = &state.ask_user_questions[state.ask_user_current_tab];
-    let question_id = current_q.id.clone();
+    let question_label = current_q.label.clone();
 
     // Check if custom input is selected
     if current_q.allow_custom && state.ask_user_selected_option == current_q.options.len() {
         // Custom input selected - save the custom answer if not empty
         if !state.ask_user_custom_input.is_empty() {
             let answer = AskUserAnswer {
-                question_id,
+                question_label: question_label.clone(),
                 answer: state.ask_user_custom_input.clone(),
                 is_custom: true,
             };
-            state.ask_user_answers.insert(current_q.id.clone(), answer);
+            state
+                .ask_user_answers
+                .insert(current_q.label.clone(), answer);
 
             // Auto-advance to next question or Submit
             if state.ask_user_current_tab < state.ask_user_questions.len() {
@@ -135,11 +163,13 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
     // Regular option selected
     if let Some(opt) = current_q.options.get(state.ask_user_selected_option) {
         let answer = AskUserAnswer {
-            question_id,
+            question_label,
             answer: opt.value.clone(),
             is_custom: false,
         };
-        state.ask_user_answers.insert(current_q.id.clone(), answer);
+        state
+            .ask_user_answers
+            .insert(current_q.label.clone(), answer);
 
         // Auto-advance to next question or Submit
         if state.ask_user_current_tab < state.ask_user_questions.len() {
@@ -243,13 +273,13 @@ pub fn handle_ask_user_submit(state: &mut AppState, output_tx: &Sender<OutputEve
         .ask_user_questions
         .iter()
         .filter(|q| q.required)
-        .all(|q| state.ask_user_answers.contains_key(&q.id));
+        .all(|q| state.ask_user_answers.contains_key(&q.label));
 
     if !all_required_answered {
         // Can't submit yet - maybe flash a warning or navigate to first unanswered
         // For now, just find the first unanswered required question and go there
         for (i, q) in state.ask_user_questions.iter().enumerate() {
-            if q.required && !state.ask_user_answers.contains_key(&q.id) {
+            if q.required && !state.ask_user_answers.contains_key(&q.label) {
                 state.ask_user_current_tab = i;
                 state.ask_user_selected_option = 0;
                 break;
@@ -262,7 +292,7 @@ pub fn handle_ask_user_submit(state: &mut AppState, output_tx: &Sender<OutputEve
     let answers: Vec<AskUserAnswer> = state
         .ask_user_questions
         .iter()
-        .filter_map(|q| state.ask_user_answers.get(&q.id).cloned())
+        .filter_map(|q| state.ask_user_answers.get(&q.label).cloned())
         .collect();
 
     let result = AskUserResult {
@@ -378,7 +408,6 @@ mod tests {
     fn create_test_questions() -> Vec<AskUserQuestion> {
         vec![
             AskUserQuestion {
-                id: "env".to_string(),
                 label: "Environment".to_string(),
                 question: "Which environment?".to_string(),
                 options: vec![
@@ -397,7 +426,6 @@ mod tests {
                 required: true,
             },
             AskUserQuestion {
-                id: "confirm".to_string(),
                 label: "Confirm".to_string(),
                 question: "Are you sure?".to_string(),
                 options: vec![
@@ -563,8 +591,8 @@ mod tests {
         handle_ask_user_select_option(&mut state, &output_tx);
 
         // Should have recorded the answer
-        assert!(state.ask_user_answers.contains_key("env"));
-        let answer = &state.ask_user_answers["env"];
+        assert!(state.ask_user_answers.contains_key("Environment"));
+        let answer = &state.ask_user_answers["Environment"];
         assert_eq!(answer.answer, "dev");
         assert!(!answer.is_custom);
 
@@ -601,8 +629,8 @@ mod tests {
         handle_ask_user_select_option(&mut state, &output_tx);
 
         // Should have recorded custom answer
-        assert!(state.ask_user_answers.contains_key("env"));
-        let answer = &state.ask_user_answers["env"];
+        assert!(state.ask_user_answers.contains_key("Environment"));
+        let answer = &state.ask_user_answers["Environment"];
         assert_eq!(answer.answer, "staging");
         assert!(answer.is_custom);
     }
@@ -697,17 +725,17 @@ mod tests {
 
         // Answer both required questions
         state.ask_user_answers.insert(
-            "env".to_string(),
+            "Environment".to_string(),
             AskUserAnswer {
-                question_id: "env".to_string(),
+                question_label: "Environment".to_string(),
                 answer: "dev".to_string(),
                 is_custom: false,
             },
         );
         state.ask_user_answers.insert(
-            "confirm".to_string(),
+            "Confirm".to_string(),
             AskUserAnswer {
-                question_id: "confirm".to_string(),
+                question_label: "Confirm".to_string(),
                 answer: "yes".to_string(),
                 is_custom: false,
             },
@@ -750,9 +778,9 @@ mod tests {
 
         // Only answer first question
         state.ask_user_answers.insert(
-            "env".to_string(),
+            "Environment".to_string(),
             AskUserAnswer {
-                question_id: "env".to_string(),
+                question_label: "Environment".to_string(),
                 answer: "dev".to_string(),
                 is_custom: false,
             },
@@ -815,8 +843,8 @@ mod tests {
         handle_ask_user_quick_select(&mut state, 2, &output_tx);
 
         // Should have selected and submitted
-        assert!(state.ask_user_answers.contains_key("env"));
-        let answer = &state.ask_user_answers["env"];
+        assert!(state.ask_user_answers.contains_key("Environment"));
+        let answer = &state.ask_user_answers["Environment"];
         assert_eq!(answer.answer, "prod");
     }
 
@@ -833,7 +861,7 @@ mod tests {
         handle_ask_user_quick_select(&mut state, 3, &output_tx);
 
         // Should just focus, not submit (need to type first)
-        assert!(!state.ask_user_answers.contains_key("env"));
+        assert!(!state.ask_user_answers.contains_key("Environment"));
         assert_eq!(state.ask_user_selected_option, 2); // Custom option
     }
 

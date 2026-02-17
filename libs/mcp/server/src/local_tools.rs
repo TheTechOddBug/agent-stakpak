@@ -246,42 +246,7 @@ pub struct ViewWebPageRequest {
     pub url: String,
 }
 
-/// Option for an ask_user question (schema type for MCP tool definition)
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AskUserOptionSchema {
-    #[schemars(description = "Value to return to LLM when selected")]
-    pub value: String,
-    #[schemars(description = "Display label for the option")]
-    pub label: String,
-    #[schemars(description = "Optional description shown below the label")]
-    pub description: Option<String>,
-}
-
-/// A question for the ask_user tool (schema type for MCP tool definition)
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AskUserQuestionSchema {
-    #[schemars(description = "Unique identifier for this question")]
-    pub id: String,
-    #[schemars(description = "Short label for tab display (max ~15 chars recommended)")]
-    pub label: String,
-    #[schemars(description = "Full question text to display")]
-    pub question: String,
-    #[schemars(description = "Predefined answer options")]
-    pub options: Vec<AskUserOptionSchema>,
-    #[schemars(description = "Whether to allow custom text input (default: true)")]
-    pub allow_custom: Option<bool>,
-    #[schemars(description = "Whether this question must be answered (default: true)")]
-    pub required: Option<bool>,
-}
-
-/// Request for the ask_user tool
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AskUserRequest {
-    #[schemars(
-        description = "List of questions to ask the user. Each question has an id, label, question text, and options."
-    )]
-    pub questions: Vec<AskUserQuestionSchema>,
-}
+use stakpak_shared::models::tools::ask_user::AskUserRequest;
 
 #[tool_router(router = tool_router_local, vis = "pub")]
 impl ToolContainer {
@@ -3058,48 +3023,9 @@ SAFETY NOTES:
 WHEN TO USE:
 - When you need to clarify requirements before proceeding
 - When there are multiple valid approaches and user preference matters
-- When gathering configuration choices or preferences
-- When you need confirmation on important decisions
-
-QUESTION STRUCTURE:
-Each question has:
-- id: Unique identifier (used in the response)
-- label: Short tab label (max ~15 chars, shown in navigation)
-- question: Full question text displayed to user
-- options: Array of predefined choices with value, label, and optional description
-- allow_custom: Whether user can type a custom answer (default: true)
-- required: Whether the question must be answered (default: true)
-
-USER INTERFACE:
-- Questions appear in a navigable popup at the bottom of the screen
-- Users can switch between questions using Tab or arrow keys
-- Options are selected with Enter or number keys (1-9)
-- Custom answers can be typed when 'Type something...' is selected
-- Submit tab confirms all answers
-
-RESPONSE FORMAT:
-Returns JSON with:
-- answers: Array of {question_id, answer, is_custom} for each answered question
-- completed: true if user submitted, false if cancelled
-- reason: Explanation if cancelled
-
-EXAMPLE:
-{
-  \"questions\": [
-    {
-      \"id\": \"env\",
-      \"label\": \"Environment\",
-      \"question\": \"Which environment should I deploy to?\",
-      \"options\": [
-        {\"value\": \"dev\", \"label\": \"Development\", \"description\": \"For testing changes\"},
-        {\"value\": \"staging\", \"label\": \"Staging\", \"description\": \"Pre-production testing\"},
-        {\"value\": \"prod\", \"label\": \"Production\", \"description\": \"Live environment\"}
-      ],
-      \"allow_custom\": false,
-      \"required\": true
-    }
-  ]
-}"
+- When confirming / gathering information
+- It's easier / faster for the user than prompting them for a full text response
+"
     )]
     pub async fn ask_user(
         &self,

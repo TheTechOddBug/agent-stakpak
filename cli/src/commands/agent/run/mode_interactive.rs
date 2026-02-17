@@ -530,50 +530,22 @@ pub async fn run_interactive(
                             .unwrap_or(&tool_call.function.name);
                         if tool_name == "ask_user" {
                             // Parse the questions from the tool call arguments
-                            match serde_json::from_str::<serde_json::Value>(
-                                &tool_call.function.arguments,
-                            ) {
-                                Ok(args) => {
-                                    if let Some(questions_value) = args.get("questions") {
-                                        match serde_json::from_value::<
-                                            Vec<
-                                                stakpak_shared::models::integrations::openai::AskUserQuestion,
-                                            >,
-                                        >(
-                                            questions_value.clone()
-                                        ) {
-                                            Ok(questions) => {
-                                                // Send the popup event to TUI
-                                                send_input_event(
-                                                    &input_tx,
-                                                    InputEvent::ShowAskUserPopup(
-                                                        tool_call.clone(),
-                                                        questions,
-                                                    ),
-                                                )
-                                                .await?;
-                                                // Don't continue - wait for AskUserResponse
-                                                continue;
-                                            }
-                                            Err(e) => {
-                                                // Failed to parse questions - return error result
-                                                messages.push(tool_result(
-                                                    tool_call.id.clone(),
-                                                    format!(
-                                                        "Failed to parse questions: {}",
-                                                        e
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        // No questions field - return error result
-                                        messages.push(tool_result(
-                                            tool_call.id.clone(),
-                                            "Missing 'questions' field in ask_user arguments"
-                                                .to_string(),
-                                        ));
-                                    }
+                            match serde_json::from_str::<
+                                stakpak_shared::models::integrations::openai::AskUserRequest,
+                            >(&tool_call.function.arguments)
+                            {
+                                Ok(request) => {
+                                    // Send the popup event to TUI
+                                    send_input_event(
+                                        &input_tx,
+                                        InputEvent::ShowAskUserPopup(
+                                            tool_call.clone(),
+                                            request.questions,
+                                        ),
+                                    )
+                                    .await?;
+                                    // Don't continue - wait for AskUserResponse
+                                    continue;
                                 }
                                 Err(e) => {
                                     // Failed to parse arguments - return error result
@@ -1320,19 +1292,16 @@ pub async fn run_interactive(
 
                                 if tool_name == "ask_user" {
                                     // Auto-approve ask_user - parse and show popup directly
-                                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(
-                                        &tool_call.function.arguments,
-                                    )
-                                        && let Some(questions_value) = args.get("questions")
-                                        && let Ok(questions) = serde_json::from_value::<
-                                            Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
-                                        >(questions_value.clone())
-                                    {
+                                    if let Ok(request) = serde_json::from_str::<
+                                        stakpak_shared::models::integrations::openai::AskUserRequest,
+                                    >(
+                                        &tool_call.function.arguments
+                                    ) {
                                         send_input_event(
                                             &input_tx,
                                             InputEvent::ShowAskUserPopup(
                                                 tool_call.clone(),
-                                                questions,
+                                                request.questions,
                                             ),
                                         )
                                         .await?;

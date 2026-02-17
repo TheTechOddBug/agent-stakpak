@@ -259,7 +259,7 @@ pub struct AppState {
     pub show_ask_user_popup: bool,
     /// Questions to display in the popup
     pub ask_user_questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
-    /// User's answers (question_id -> answer)
+    /// User's answers (question label -> answer)
     pub ask_user_answers:
         HashMap<String, stakpak_shared::models::integrations::openai::AskUserAnswer>,
     /// Currently selected tab index (question index, or questions.len() for Submit)
