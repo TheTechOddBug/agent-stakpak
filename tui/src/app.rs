@@ -254,10 +254,10 @@ pub struct AppState {
     /// Buffered user messages waiting to be sent after streaming completes
     pub pending_user_messages: VecDeque<PendingUserMessage>,
 
-    // ========== Ask User Popup State ==========
-    /// Whether the ask user popup is visible
+    // ========== Ask User Inline Block State ==========
+    /// Whether the ask user interaction is active
     pub show_ask_user_popup: bool,
-    /// Questions to display in the popup
+    /// Questions to display in the inline block
     pub ask_user_questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
     /// User's answers (question label -> answer)
     pub ask_user_answers:
@@ -268,8 +268,12 @@ pub struct AppState {
     pub ask_user_selected_option: usize,
     /// Custom input text when "Type something..." is selected
     pub ask_user_custom_input: String,
-    /// The tool call that triggered this popup (for sending result back)
+    /// The tool call that triggered this (for sending result back)
     pub ask_user_tool_call: Option<ToolCall>,
+    /// Message ID for the inline ask_user block in the messages list
+    pub ask_user_message_id: Option<Uuid>,
+    /// Whether the ask_user block has keyboard focus (Tab toggles)
+    pub ask_user_focused: bool,
 }
 
 pub struct AppStateOptions<'a> {
@@ -531,7 +535,7 @@ impl AppState {
             subagent_pause_info: HashMap::new(),
             init_prompt_content,
 
-            // Ask User popup initialization
+            // Ask User inline block initialization
             show_ask_user_popup: false,
             ask_user_questions: Vec::new(),
             ask_user_answers: HashMap::new(),
@@ -539,6 +543,8 @@ impl AppState {
             ask_user_selected_option: 0,
             ask_user_custom_input: String::new(),
             ask_user_tool_call: None,
+            ask_user_message_id: None,
+            ask_user_focused: true,
         }
     }
 

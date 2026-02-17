@@ -12,7 +12,7 @@
 //! │  Should academies be public by default (visible to all users), or should they    │
 //! │  require admin approval before being listed?                                     │
 //! │                                                                                  │
-//! │  [>] Public by default                                                           │
+//! │  [*] Public by default                                                           │
 //! │       Academies are visible immediately after creation                            │
 //! │  [2] Require approval                                                            │
 //! │       Admin must approve before academy appears in listings                      │
@@ -241,7 +241,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
             )
         } else if is_selected {
             (
-                "[>]",
+                "[*]",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -299,7 +299,7 @@ fn render_question_content(f: &mut Frame, state: &AppState, area: Rect) {
             )
         } else if is_selected {
             (
-                "[>]".to_string(),
+                "[*]".to_string(),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
