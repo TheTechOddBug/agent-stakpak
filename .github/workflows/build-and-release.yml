@@ -85,7 +85,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          FEATURES=""
+          if [[ "${{ matrix.target }}" == *"linux-musl"* ]]; then
+            FEATURES="--features jemalloc"
+          fi
+          cargo build --release --target ${{ matrix.target }} $FEATURES
         env:
           RUSTFLAGS: ${{ endsWith(matrix.target, 'linux-gnu') && '-C target-feature=+crt-static' || '' }}
 

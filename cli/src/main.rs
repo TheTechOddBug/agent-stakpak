@@ -3,6 +3,14 @@
 // delimiters on the same strings.
 #![allow(clippy::string_slice)]
 
+// On Linux musl, the default allocator aggressively munmap's freed pages back to the
+// kernel. This causes use-after-free SIGSEGV in libsql's sqlite3Close() when concurrent
+// threads race between Database::drop() and page reclamation. jemalloc retains freed
+// pages in its arena, preventing this class of crash.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use clap::Parser;
 use names::{self, Name};
 use rustls::crypto::CryptoProvider;

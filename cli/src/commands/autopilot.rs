@@ -880,14 +880,8 @@ async fn start_foreground_runtime(
             .try_init();
     }
 
-    // --- 1. Schedule runtime ---
-    let schedule_task = tokio::spawn(async {
-        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
-            eprintln!("Schedule runtime exited: {}", error);
-        }
-    });
-
-    // --- 2. Server runtime ---
+    // --- 1. Server runtime (initialize before scheduler to avoid sqlite3Close/sqlite3_open
+    //     race on libsql's global state when run_scheduler exits early) ---
     let bind = options.bind.clone();
     let (auth_config, generated_auth_token) = if options.no_auth {
         (stakpak_server::AuthConfig::disabled(), None)
@@ -1120,6 +1114,14 @@ async fn start_foreground_runtime(
         None
     };
     let gateway_cancel_for_shutdown = gateway_cancel.clone();
+
+    // --- 4. Schedule runtime (spawned AFTER all SQLite initialization to avoid
+    //     sqlite3Close/sqlite3_open race in libsql on musl) ---
+    let schedule_task = tokio::spawn(async {
+        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
+            eprintln!("Schedule runtime exited: {}", error);
+        }
+    });
 
     // --- Print status ---
     println!("Autopilot running in foreground. Press Ctrl+C to stop.");
