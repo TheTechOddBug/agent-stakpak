@@ -59,7 +59,6 @@ Generate infrastructure code, debug Kubernetes, configure CI/CD, automate deploy
 Use the new lifecycle aliases for one-command setup/start/stop:
 
 ```bash
-stakpak onboard   # alias for: stakpak init
 stakpak up        # alias for: stakpak autopilot up
 stakpak down      # alias for: stakpak autopilot down
 ```
@@ -67,7 +66,6 @@ stakpak down      # alias for: stakpak autopilot down
 You can also use the canonical subcommands:
 
 ```bash
-stakpak autopilot init
 stakpak autopilot up
 stakpak autopilot status
 stakpak autopilot logs
