@@ -669,6 +669,58 @@ mod tests {
     }
 
     #[test]
+    fn cli_rejects_profile_flag_on_up() {
+        let parsed = Cli::try_parse_from(["stakpak", "up", "--profile", "staging"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cli_accepts_root_profile_with_up() {
+        let parsed = Cli::try_parse_from(["stakpak", "--profile", "staging", "up"]);
+        assert!(parsed.is_ok());
+
+        if let Ok(cli) = parsed {
+            assert_eq!(cli.profile.as_deref(), Some("staging"));
+            match cli.command {
+                Some(Commands::Up { .. }) => {}
+                _ => panic!("Expected up command"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_profile_flag_on_autopilot_status() {
+        let parsed =
+            Cli::try_parse_from(["stakpak", "autopilot", "status", "--profile", "staging"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cli_parses_auth_login_endpoint_flag() {
+        let parsed = Cli::try_parse_from([
+            "stakpak",
+            "auth",
+            "login",
+            "--provider",
+            "stakpak",
+            "--api-key",
+            "test-key",
+            "--endpoint",
+            "https://self-hosted.example.com",
+        ]);
+        assert!(parsed.is_ok());
+
+        if let Ok(cli) = parsed {
+            match cli.command {
+                Some(Commands::Auth(commands::AuthCommands::Login { endpoint, .. })) => {
+                    assert_eq!(endpoint.as_deref(), Some("https://self-hosted.example.com"));
+                }
+                _ => panic!("Expected auth login command"),
+            }
+        }
+    }
+
+    #[test]
     fn autopilot_related_commands_do_not_require_auth() {
         assert!(
             !Commands::Autopilot(commands::AutopilotCommands::Status {
