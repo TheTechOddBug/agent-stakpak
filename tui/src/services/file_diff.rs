@@ -2,6 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::TextDiff;
 use stakpak_shared::models::integrations::openai::ToolCall;
+use stakpak_shared::utils::strip_tool_name;
 
 use crate::services::detect_term::AdaptiveColors;
 
@@ -446,7 +447,7 @@ pub fn render_file_diff_block_from_args(
         .unwrap_or_else(|_| serde_json::json!({}));
 
     let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
-    let new_str = if crate::utils::strip_tool_name(&tool_call.function.name) == "create" {
+    let new_str = if strip_tool_name(&tool_call.function.name) == "create" {
         args.get("file_text").and_then(|v| v.as_str()).unwrap_or("")
     } else {
         args.get("new_str").and_then(|v| v.as_str()).unwrap_or("")

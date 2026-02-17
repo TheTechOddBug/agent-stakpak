@@ -12,6 +12,7 @@ use crate::services::message::{
 use ratatui::layout::Size;
 use ratatui::style::Color;
 use stakpak_shared::models::integrations::openai::ToolCall;
+use stakpak_shared::utils::strip_tool_name;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
@@ -20,7 +21,7 @@ use super::EventChannels;
 /// Update a run_command block from Pending to Running state
 /// This should be called when a run_command tool is approved and starts executing
 pub fn update_run_command_to_running(state: &mut AppState, tool_call: &ToolCall) {
-    let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+    let tool_name = strip_tool_name(&tool_call.function.name);
     if tool_name != "run_command" {
         return;
     }
@@ -59,7 +60,7 @@ pub fn update_pending_tool_to_first(
         state.messages.retain(|m| m.id != pending_id);
     }
 
-    let tool_name = crate::utils::strip_tool_name(&first_tool.function.name);
+    let tool_name = strip_tool_name(&first_tool.function.name);
 
     // Create the appropriate pending block based on tool type
     if tool_name == "run_command" {
@@ -120,7 +121,7 @@ pub fn handle_esc_event(
     state.tool_call_execution_order.clear();
     // Store the latest tool call for potential retry (only for run_command)
     if let Some(tool_call) = &state.dialog_command
-        && crate::utils::strip_tool_name(&tool_call.function.name) == "run_command"
+        && strip_tool_name(&tool_call.function.name) == "run_command"
     {
         state.latest_tool_call = Some(tool_call.clone());
     }
@@ -169,7 +170,7 @@ pub fn handle_esc(
                 .output_tx
                 .try_send(OutputEvent::RejectTool(tool_call.clone(), should_stop));
 
-            let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+            let tool_name = strip_tool_name(&tool_call.function.name);
             if tool_name == "run_command" {
                 // For run_command, remove the pending unified block and add rejected unified block
                 // Remove pending message by tool_call_id
@@ -305,7 +306,7 @@ pub fn handle_show_confirmation_dialog(
         .map(|status| status == &ToolCallStatus::Executed)
         .unwrap_or(false)
     {
-        let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+        let tool_name = strip_tool_name(&tool_call.function.name);
         if tool_name == "run_command" {
             // Use unified block for run_command
             let command =
@@ -338,7 +339,7 @@ pub fn handle_show_confirmation_dialog(
     }
 
     state.dialog_command = Some(tool_call.clone());
-    let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+    let tool_name = strip_tool_name(&tool_call.function.name);
     if tool_name == "run_command" {
         state.latest_tool_call = Some(tool_call.clone());
     }

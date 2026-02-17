@@ -20,6 +20,7 @@ use stakpak_shared::local_store::LocalStore;
 use stakpak_shared::models::async_manifest::{AsyncManifest, PauseReason, PendingToolCall};
 use stakpak_shared::models::integrations::openai::{ChatMessage, MessageContent, Role};
 use stakpak_shared::models::llm::LLMTokenUsage;
+use stakpak_shared::utils::{backward_compatibility_mapping, strip_tool_name};
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
@@ -73,6 +74,13 @@ impl AsyncAutoApproveConfig {
     fn new(auto_approve_tools: Option<&Vec<String>>) -> Self {
         let mut tools = HashMap::new();
 
+        // Normalize profile auto-approve tools (mapping legacy names)
+        let normalized_profile_tools: Option<Vec<String>> = auto_approve_tools.map(|pt| {
+            pt.iter()
+                .map(|s| backward_compatibility_mapping(s).to_string())
+                .collect()
+        });
+
         // Auto-approve tools (read-only, safe):
         for name in &[
             "view",
@@ -104,14 +112,9 @@ impl AsyncAutoApproveConfig {
         }
 
         // Apply profile overrides
-        if let Some(profile_tools) = auto_approve_tools {
-            for tool_name in profile_tools {
-                let name = if tool_name == "read_rulebook" {
-                    "load_skill".to_string()
-                } else {
-                    tool_name.clone()
-                };
-                tools.insert(name, AsyncApprovePolicy::Auto);
+        if let Some(profile_tools) = &normalized_profile_tools {
+            for name in profile_tools {
+                tools.insert(name.clone(), AsyncApprovePolicy::Auto);
             }
         }
 
@@ -123,14 +126,11 @@ impl AsyncAutoApproveConfig {
             && let Some(session_tools) = session_config.get("tools").and_then(|t| t.as_object())
         {
             for (name, policy_val) in session_tools {
-                let mapped_name = if name == "read_rulebook" {
-                    "load_skill"
-                } else {
-                    name
-                };
+                let mapped_name = backward_compatibility_mapping(name);
 
                 // Don't override profile-specified tools
-                if auto_approve_tools
+                if normalized_profile_tools
+                    .as_ref()
                     .map(|pt| pt.iter().any(|s| s == mapped_name))
                     .unwrap_or(false)
                 {
@@ -152,21 +152,8 @@ impl AsyncAutoApproveConfig {
         }
     }
 
-    /// Strip MCP server prefix from tool name (e.g., "stakpak__run_command" -> "run_command").
-    fn strip_prefix(name: &str) -> &str {
-        if let Some(pos) = name.find("__")
-            && pos + 2 < name.len()
-        {
-            return &name[pos + 2..];
-        }
-        name
-    }
-
     fn get_policy(&self, tool_name: &str) -> &AsyncApprovePolicy {
-        let mut stripped = Self::strip_prefix(tool_name);
-        if stripped == "read_rulebook" {
-            stripped = "load_skill";
-        }
+        let stripped = strip_tool_name(tool_name);
         self.tools.get(stripped).unwrap_or(&self.default_policy)
     }
 

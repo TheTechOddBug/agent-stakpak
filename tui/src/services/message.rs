@@ -17,6 +17,7 @@ use stakpak_shared::models::integrations::openai::FunctionCall;
 use stakpak_shared::models::integrations::openai::{
     ToolCall, ToolCallResult, ToolCallResultStatus, ToolCallStreamInfo,
 };
+use stakpak_shared::utils::strip_tool_name;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -1258,7 +1259,7 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
         }
         MessageContent::RenderPendingBorderBlock(tool_call, is_auto_approved) => {
             let full_command = extract_full_command_arguments(tool_call);
-            let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+            let tool_name = strip_tool_name(&tool_call.function.name);
             let rendered = if (tool_name == "str_replace" || tool_name == "create")
                 && !render_file_diff(tool_call, width).is_empty()
             {
@@ -1306,7 +1307,7 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
             lines.extend(convert_to_owned_lines(borrowed));
         }
         MessageContent::RenderCollapsedMessage(tool_call) => {
-            let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+            let tool_name = strip_tool_name(&tool_call.function.name);
             if (tool_name == "str_replace" || tool_name == "create")
                 && let Some(rendered) = render_file_diff_full(tool_call, width, Some(true))
                 && !rendered.is_empty()
@@ -1903,7 +1904,7 @@ fn get_wrapped_message_lines_internal(
             }
             MessageContent::RenderPendingBorderBlock(tool_call, is_auto_approved) => {
                 let full_command = extract_full_command_arguments(tool_call);
-                let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+                let tool_name = strip_tool_name(&tool_call.function.name);
                 let rendered_lines = if (tool_name == "str_replace" || tool_name == "create")
                     && !render_file_diff(tool_call, width).is_empty()
                 {
@@ -1957,7 +1958,7 @@ fn get_wrapped_message_lines_internal(
             }
 
             MessageContent::RenderCollapsedMessage(tool_call) => {
-                let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+                let tool_name = strip_tool_name(&tool_call.function.name);
                 if (tool_name == "str_replace" || tool_name == "create")
                     && let Some(rendered_lines) =
                         render_file_diff_full(tool_call, width, Some(true))
@@ -2172,7 +2173,7 @@ pub fn extract_truncated_command_arguments(tool_call: &ToolCall, sign: Option<St
     let arguments = serde_json::from_str::<Value>(&tool_call.function.arguments);
 
     // For subagent tasks, show description + tools summary instead of raw args
-    let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+    let tool_name = strip_tool_name(&tool_call.function.name);
     if tool_name == "dynamic_subagent_task"
         && let Ok(ref args) = arguments
     {
@@ -2455,7 +2456,7 @@ pub fn extract_command_purpose(command: &str, outside_title: &str) -> String {
 
 // Helper function to get command name for the outside title
 pub fn get_command_type_name(tool_call: &ToolCall) -> String {
-    match crate::utils::strip_tool_name(&tool_call.function.name) {
+    match strip_tool_name(&tool_call.function.name) {
         "create_file" => "Create file".to_string(),
         "create" => "Create".to_string(),
         "edit_file" => "Edit file".to_string(),
@@ -2484,7 +2485,7 @@ pub fn get_command_type_name(tool_call: &ToolCall) -> String {
         }
         _ => {
             // Convert function name to title case
-            crate::utils::strip_tool_name(&tool_call.function.name)
+            strip_tool_name(&tool_call.function.name)
                 .replace("_", " ")
                 .split_whitespace()
                 .map(|word| {
