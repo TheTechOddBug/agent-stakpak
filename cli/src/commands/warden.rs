@@ -172,6 +172,14 @@ pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
         volumes_to_mount.extend(warden_config.volumes.clone());
     }
 
+    // Always mount the aqua tool cache as a named volume so downloaded CLI tools
+    // persist across container runs (see Dockerfile CACHING section).
+    let aqua_cache_volume = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua".to_string();
+    let aqua_already_mounted = volumes_to_mount.iter().any(|v| v.contains("aquaproj-aqua"));
+    if !aqua_already_mounted {
+        volumes_to_mount.push(aqua_cache_volume);
+    }
+
     // Always append stakpak config and auth files if they exist and not already in the list
     if let Ok(home_dir) = std::env::var("HOME") {
         let stakpak_dir = Path::new(&home_dir).join(".stakpak");
@@ -418,4 +426,143 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
 
     // Execute the warden command with appropriate TTY handling
     execute_warden_command(cmd, needs_tty)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ProviderType, WardenConfig};
+    use std::collections::HashMap;
+
+    /// Minimal AppConfig for testing prepare_volumes.
+    fn test_config(warden: Option<WardenConfig>) -> AppConfig {
+        AppConfig {
+            api_endpoint: "https://test".into(),
+            api_key: None,
+            mcp_server_host: None,
+            machine_name: None,
+            auto_append_gitignore: None,
+            profile_name: "test".into(),
+            config_path: "/tmp/test".into(),
+            allowed_tools: None,
+            auto_approve: None,
+            rulebooks: None,
+            warden,
+            provider: ProviderType::Remote,
+            providers: HashMap::new(),
+            smart_model: None,
+            eco_model: None,
+            recovery_model: None,
+            model: None,
+            anonymous_id: None,
+            collect_telemetry: None,
+            editor: None,
+        }
+    }
+
+    fn has_aqua_cache(volumes: &[String]) -> bool {
+        volumes.iter().any(|v| v.contains("aquaproj-aqua"))
+    }
+
+    // ── Interactive / async mode (run_stakpak_in_warden path) ──────────
+    // Uses prepare_volumes(config, false) — warden enabled flag is ignored.
+
+    #[test]
+    fn aqua_cache_present_when_warden_enabled_check_disabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec!["/tmp:/tmp:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_warden_disabled_check_disabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: false,
+            volumes: vec!["/tmp:/tmp:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_no_warden_config() {
+        let config = test_config(None);
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Default warden command (run_default_warden path) ───────────────
+    // Uses prepare_volumes(config, true) — only includes profile volumes
+    // when warden.enabled is true.
+
+    #[test]
+    fn aqua_cache_present_when_warden_enabled_check_enabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec!["./:/agent:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, true);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_warden_disabled_check_enabled() {
+        // check_enabled=true + enabled=false → profile volumes skipped,
+        // but aqua cache must still be present.
+        let config = test_config(Some(WardenConfig {
+            enabled: false,
+            volumes: vec!["./:/agent:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, true);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Agent server / subagent sandbox path ───────────────────────────
+    // Autopilot calls prepare_volumes(config, false) and passes the result
+    // into SandboxConfig.volumes. Same as interactive mode.
+
+    #[test]
+    fn aqua_cache_present_for_agent_server_sandbox() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: WardenConfig::readonly_profile().volumes,
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Dedup: user already has a custom aqua mount ────────────────────
+
+    #[test]
+    fn aqua_cache_not_duplicated_when_user_provides_custom_mount() {
+        let custom = "/my/aqua:/home/agent/.local/share/aquaproj-aqua".to_string();
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec![custom.clone()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        let aqua_count = vols.iter().filter(|v| v.contains("aquaproj-aqua")).count();
+        assert_eq!(aqua_count, 1, "should keep user mount, not add a second: {vols:?}");
+        assert!(vols.contains(&custom), "user mount should be preserved");
+    }
+
+    // ── expand_volume_path ─────────────────────────────────────────────
+
+    #[test]
+    fn expand_volume_path_leaves_named_volumes_unchanged() {
+        let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua".to_string();
+        assert_eq!(expand_volume_path(named.clone()), named);
+    }
+
+    #[test]
+    fn expand_volume_path_expands_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            let input = "~/data:/data:ro".to_string();
+            let expanded = expand_volume_path(input);
+            assert!(expanded.starts_with(&home), "tilde not expanded: {expanded}");
+            assert!(!expanded.starts_with('~'), "tilde still present: {expanded}");
+        }
+    }
 }

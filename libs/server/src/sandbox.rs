@@ -201,9 +201,14 @@ async fn spawn_warden_container(
     // Mount configured volumes
     for vol in &config.volumes {
         let expanded = expand_volume_path(vol);
-        // Only mount volumes where the host path exists
         let host_path = expanded.split(':').next().unwrap_or(&expanded);
-        if Path::new(host_path).exists() {
+        // Named volumes (e.g. "stakpak-aqua-cache:/container/path") don't have a
+        // host filesystem path — mount them unconditionally. Bind mounts are only
+        // added when the host path actually exists.
+        let is_named_volume = !host_path.starts_with('/')
+            && !host_path.starts_with('.')
+            && !host_path.contains('/');
+        if is_named_volume || Path::new(host_path).exists() {
             cmd.args(["--volume", &expanded]);
         }
     }
@@ -510,5 +515,36 @@ MIIB0zCCAXmgAwIBAgIUFAKE=
         assert!(server_ca_pem.contains("BEGIN CERTIFICATE"));
         assert!(!client_ca_pem.contains("PRIVATE KEY"));
         assert!(!server_ca_pem.contains("PRIVATE KEY"));
+    }
+
+    // ── Named volume detection in expand_volume_path / mount filter ────
+
+    #[test]
+    fn expand_volume_path_leaves_named_volumes_unchanged() {
+        let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua";
+        assert_eq!(super::expand_volume_path(named), named);
+    }
+
+    /// Named volumes (no `/` or `.` prefix in the host part) must pass the
+    /// mount filter even though they don't exist on the host filesystem.
+    #[test]
+    fn named_volume_is_detected_correctly() {
+        let cases = vec![
+            ("stakpak-aqua-cache", true),
+            ("my-volume", true),
+            ("./relative/path", false),
+            ("/absolute/path", false),
+            ("relative/with/slash", false),
+            (".", false),
+        ];
+        for (host_part, expected) in cases {
+            let is_named = !host_part.starts_with('/')
+                && !host_part.starts_with('.')
+                && !host_part.contains('/');
+            assert_eq!(
+                is_named, expected,
+                "host_part={host_part:?} expected named={expected}"
+            );
+        }
     }
 }
