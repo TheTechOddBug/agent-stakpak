@@ -3,6 +3,8 @@ name: "[TEMP] Validate jemalloc fix"
 on:
   push:
     branches: ["*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -18,13 +20,9 @@ jobs:
           - target: x86_64-unknown-linux-musl
             docker: rust:1.91-alpine3.21
             runner: ubuntu-latest
-            run_tests: true
           - target: aarch64-unknown-linux-musl
             docker: rust:1.91-alpine3.21
             runner: ubuntu-22.04-arm
-            # libsql has a known SIGSEGV during test exit on aarch64-musl
-            # (unrelated to the allocator bug) — build-only here.
-            run_tests: false
 
     steps:
       - uses: actions/checkout@v4
@@ -56,12 +54,8 @@ jobs:
             echo "=== Build with jemalloc ==="
             cargo build --target ${{ matrix.target }} --features jemalloc
 
-            if [ "${{ matrix.run_tests }}" = "true" ]; then
-              echo "=== Test with jemalloc ==="
-              cargo test --workspace --target ${{ matrix.target }} --features jemalloc
-            else
-              echo "=== Skipping tests (known libsql exit SIGSEGV on ${{ matrix.target }}) ==="
-            fi
+            echo "=== Test with jemalloc ==="
+            cargo test --workspace --target ${{ matrix.target }} --features jemalloc
 
             echo "=== Verify jemalloc overrides system malloc ==="
             BINARY="target/${{ matrix.target }}/debug/stakpak"
