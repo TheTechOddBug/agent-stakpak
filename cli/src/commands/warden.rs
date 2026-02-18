@@ -1,14 +1,13 @@
-use crate::config::{AppConfig, warden::stakpak_agent_default_mounts};
+use crate::config::AppConfig;
 use crate::utils::plugins::{PluginConfig, get_plugin_path};
 use clap::Subcommand;
+// Re-export container constants so existing callers (autopilot.rs) don't need to change imports.
+pub use stakpak_shared::container::{
+    expand_volume_path, stakpak_agent_default_mounts, stakpak_agent_image,
+};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::thread;
-
-/// The container image used for sandboxed agent sessions.
-pub fn stakpak_agent_image() -> String {
-    format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"))
-}
 
 #[derive(Subcommand, PartialEq)]
 pub enum WardenCommands {
@@ -83,7 +82,7 @@ impl WardenCommands {
                 // Prepare volumes from config first, then add user-specified volumes
                 // User volumes come last to allow overrides
                 for vol in prepare_volumes(&config, false) {
-                    let expanded_vol = expand_volume_path(vol);
+                    let expanded_vol = expand_volume_path(&vol);
                     cmd.args(["--volume", &expanded_vol]);
                 }
 
@@ -185,19 +184,6 @@ pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
     }
 
     volumes_to_mount
-}
-
-/// Helper function to expand tilde (~) in volume paths to home directory
-fn expand_volume_path(volume: String) -> String {
-    if volume.starts_with("~/") || volume.starts_with("~:") {
-        if let Ok(home_dir) = std::env::var("HOME") {
-            volume.replacen("~", &home_dir, 1)
-        } else {
-            volume
-        }
-    } else {
-        volume
-    }
 }
 
 /// Execute warden command with proper TTY handling and streaming
@@ -308,7 +294,7 @@ pub async fn run_default_warden(
 
     // Prepare and mount volumes
     for volume in prepare_volumes(&config, true) {
-        let expanded_volume = expand_volume_path(volume);
+        let expanded_volume = expand_volume_path(&volume);
         cmd.args(["--volume", &expanded_volume]);
     }
 
@@ -356,7 +342,7 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
 
     // Prepare and mount volumes (don't check enabled flag for this function)
     for volume in prepare_volumes(&config, false) {
-        let expanded_volume = expand_volume_path(volume);
+        let expanded_volume = expand_volume_path(&volume);
         cmd.args(["--volume", &expanded_volume]);
     }
 
@@ -517,15 +503,14 @@ mod tests {
 
     #[test]
     fn expand_volume_path_leaves_named_volumes_unchanged() {
-        let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua".to_string();
-        assert_eq!(expand_volume_path(named.clone()), named);
+        let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua";
+        assert_eq!(expand_volume_path(named), named);
     }
 
     #[test]
     fn expand_volume_path_expands_tilde() {
         if let Ok(home) = std::env::var("HOME") {
-            let input = "~/data:/data:ro".to_string();
-            let expanded = expand_volume_path(input);
+            let expanded = expand_volume_path("~/data:/data:ro");
             assert!(
                 expanded.starts_with(&home),
                 "tilde not expanded: {expanded}"

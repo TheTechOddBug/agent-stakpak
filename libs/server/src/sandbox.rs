@@ -179,21 +179,13 @@ impl SandboxedMcpServer {
     }
 }
 
-/// Expand `~` to `$HOME` in a volume path.
-fn expand_volume_path(volume: &str) -> String {
-    if (volume.starts_with("~/") || volume.starts_with("~:"))
-        && let Ok(home_dir) = std::env::var("HOME")
-    {
-        return volume.replacen("~", &home_dir, 1);
-    }
-    volume.to_string()
-}
-
 async fn spawn_warden_container(
     config: &SandboxConfig,
     host_port: u16,
     client_ca_pem: &str,
 ) -> Result<Child, String> {
+    use stakpak_shared::container::{expand_volume_path, is_named_volume};
+
     let mut cmd = tokio::process::Command::new(&config.warden_path);
     cmd.arg("wrap");
     cmd.arg(&config.image);
@@ -205,9 +197,7 @@ async fn spawn_warden_container(
         // Named volumes (e.g. "stakpak-aqua-cache:/container/path") don't have a
         // host filesystem path — mount them unconditionally. Bind mounts are only
         // added when the host path actually exists.
-        let is_named_volume =
-            !host_path.starts_with('/') && !host_path.starts_with('.') && !host_path.contains('/');
-        if is_named_volume || Path::new(host_path).exists() {
+        if is_named_volume(host_path) || Path::new(host_path).exists() {
             cmd.args(["--volume", &expanded]);
         }
     }
@@ -520,14 +510,16 @@ MIIB0zCCAXmgAwIBAgIUFAKE=
 
     #[test]
     fn expand_volume_path_leaves_named_volumes_unchanged() {
+        use stakpak_shared::container::expand_volume_path;
         let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua";
-        assert_eq!(super::expand_volume_path(named), named);
+        assert_eq!(expand_volume_path(named), named);
     }
 
     /// Named volumes (no `/` or `.` prefix in the host part) must pass the
     /// mount filter even though they don't exist on the host filesystem.
     #[test]
     fn named_volume_is_detected_correctly() {
+        use stakpak_shared::container::is_named_volume;
         let cases = vec![
             ("stakpak-aqua-cache", true),
             ("my-volume", true),
@@ -537,11 +529,9 @@ MIIB0zCCAXmgAwIBAgIUFAKE=
             (".", false),
         ];
         for (host_part, expected) in cases {
-            let is_named = !host_part.starts_with('/')
-                && !host_part.starts_with('.')
-                && !host_part.contains('/');
             assert_eq!(
-                is_named, expected,
+                is_named_volume(host_part),
+                expected,
                 "host_part={host_part:?} expected named={expected}"
             );
         }
