@@ -2,6 +2,7 @@
 //!
 //! Handles loading and validating `autopilot.toml` configuration files.
 
+use super::db::RELOAD_SENTINEL;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -123,6 +124,10 @@ pub struct ScheduleDefaults {
     #[serde(default = "default_pause_on_approval")]
     pub pause_on_approval: bool,
 
+    /// Run agent tool calls inside a sandboxed warden container.
+    #[serde(default)]
+    pub sandbox: bool,
+
     /// Determines which check script exit codes trigger the agent.
     /// - "success" (default): trigger on exit 0
     /// - "failure": trigger on non-zero exit codes (1+)
@@ -140,6 +145,7 @@ impl Default for ScheduleDefaults {
             enable_slack_tools: false,
             enable_subagents: false,
             pause_on_approval: default_pause_on_approval(),
+            sandbox: false,
             trigger_on: CheckTriggerOn::default(),
         }
     }
@@ -159,6 +165,10 @@ fn default_check_timeout() -> Duration {
 
 fn default_pause_on_approval() -> bool {
     false // Default to auto-approve, matching async mode default
+}
+
+fn default_schedule_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +275,10 @@ pub struct Schedule {
     /// Falls back to defaults.pause_on_approval if not specified.
     pub pause_on_approval: Option<bool>,
 
+    /// Run agent tool calls inside a sandboxed warden container.
+    /// Falls back to defaults.sandbox if not specified.
+    pub sandbox: Option<bool>,
+
     /// Notification mode override for this schedule.
     pub notify_on: Option<NotifyOn>,
 
@@ -273,6 +287,10 @@ pub struct Schedule {
 
     /// Notification chat target override.
     pub notify_chat_id: Option<String>,
+
+    /// Whether this schedule is active.
+    #[serde(default = "default_schedule_enabled")]
+    pub enabled: bool,
 }
 
 impl Schedule {
@@ -310,6 +328,11 @@ impl Schedule {
     /// Get the effective pause_on_approval, falling back to defaults.
     pub fn effective_pause_on_approval(&self, defaults: &ScheduleDefaults) -> bool {
         self.pause_on_approval.unwrap_or(defaults.pause_on_approval)
+    }
+
+    /// Get the effective sandbox, falling back to defaults.
+    pub fn effective_sandbox(&self, defaults: &ScheduleDefaults) -> bool {
+        self.sandbox.unwrap_or(defaults.sandbox)
     }
 
     /// Resolve notification delivery target using schedule overrides and global defaults.
@@ -381,6 +404,9 @@ pub enum ConfigError {
     #[error("Duplicate schedule name: '{0}'")]
     DuplicateScheduleName(String),
 
+    #[error("Schedule name '{0}' is reserved")]
+    ReservedScheduleName(String),
+
     #[error("Check script not found for schedule '{schedule}': {path}")]
     CheckScriptNotFound { schedule: String, path: String },
 
@@ -413,6 +439,7 @@ impl ScheduleConfig {
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_unique_schedule_names()?;
+        self.validate_reserved_schedule_names()?;
         self.validate_cron_expressions()?;
         self.validate_check_scripts()?;
         Ok(())
@@ -424,6 +451,16 @@ impl ScheduleConfig {
         for schedule in &self.schedules {
             if !seen.insert(&schedule.name) {
                 return Err(ConfigError::DuplicateScheduleName(schedule.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ensure no reserved schedule names are used.
+    fn validate_reserved_schedule_names(&self) -> Result<(), ConfigError> {
+        for schedule in &self.schedules {
+            if schedule.name.trim() == RELOAD_SENTINEL {
+                return Err(ConfigError::ReservedScheduleName(schedule.name.clone()));
             }
         }
         Ok(())
@@ -604,6 +641,25 @@ prompt = "Second"
         assert!(matches!(err, ConfigError::DuplicateScheduleName(_)));
         if let ConfigError::DuplicateScheduleName(name) = err {
             assert_eq!(name, "duplicate");
+        }
+    }
+
+    #[test]
+    fn test_reserved_schedule_name_rejected() {
+        let config_str = r#"
+[[schedules]]
+name = "__config_reload__"
+cron = "0 * * * *"
+prompt = "Reserved"
+"#;
+
+        let result = ScheduleConfig::parse(config_str);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::ReservedScheduleName(_)));
+        if let ConfigError::ReservedScheduleName(name) = err {
+            assert_eq!(name, "__config_reload__");
         }
     }
 

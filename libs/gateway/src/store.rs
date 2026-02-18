@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use libsql::Connection;
-use tokio::sync::Mutex;
+use libsql::{Connection, Database};
+use tempfile::TempDir;
 
 use crate::types::DeliveryContext;
 
@@ -15,7 +15,10 @@ pub struct SessionMapping {
 }
 
 pub struct GatewayStore {
-    conn: Mutex<Connection>,
+    /// Keep the libsql Database handle alive for the lifetime of each operation connection.
+    db: Database,
+    /// Owns temporary backing storage for in-memory test mode and cleans it on drop.
+    _temp_dir: Option<TempDir>,
 }
 
 impl GatewayStore {
@@ -30,33 +33,37 @@ impl GatewayStore {
             .build()
             .await
             .with_context(|| format!("failed to open sqlite db: {}", path.display()))?;
-        let conn = db.connect().context("failed to connect sqlite db")?;
-
         let store = Self {
-            conn: Mutex::new(conn),
+            db,
+            _temp_dir: None,
         };
         store.run_migrations().await?;
         Ok(store)
     }
 
     pub async fn open_in_memory() -> Result<Self> {
-        let db = libsql::Builder::new_local(":memory:")
+        // libsql in-memory databases are connection-scoped; use a temp directory
+        // and clean it automatically when the store is dropped.
+        let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
+        let db_path = temp_dir.path().join("gateway.db");
+        let db = libsql::Builder::new_local(&db_path)
             .build()
             .await
-            .context("failed to open in-memory sqlite db")?;
-        let conn = db
-            .connect()
-            .context("failed to connect in-memory sqlite db")?;
-
+            .with_context(|| format!("failed to open temp sqlite db: {}", db_path.display()))?;
         let store = Self {
-            conn: Mutex::new(conn),
+            db,
+            _temp_dir: Some(temp_dir),
         };
         store.run_migrations().await?;
         Ok(store)
     }
 
+    fn connection(&self) -> Result<Connection> {
+        self.db.connect().context("failed to connect sqlite db")
+    }
+
     pub async fn get(&self, routing_key: &str) -> Result<Option<SessionMapping>> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let mut rows = conn
             .query(
                 "SELECT session_id, title, channel, peer_id, chat_type, channel_meta, created_at, updated_at
@@ -84,7 +91,7 @@ impl GatewayStore {
         let channel_meta = serde_json::to_string(&mapping.delivery.channel_meta)
             .context("failed to serialize channel_meta")?;
 
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         conn.execute(
             "INSERT OR REPLACE INTO sessions
              (routing_key, session_id, title, channel, peer_id, chat_type, channel_meta, created_at, updated_at)
@@ -111,7 +118,7 @@ impl GatewayStore {
         &self,
         session_id: &str,
     ) -> Result<Option<(String, SessionMapping)>> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let mut rows = conn
             .query(
                 "SELECT routing_key, session_id, title, channel, peer_id, chat_type, channel_meta, created_at, updated_at
@@ -144,7 +151,7 @@ impl GatewayStore {
         let channel_meta = serde_json::to_string(&delivery.channel_meta)
             .context("failed to serialize channel_meta")?;
 
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         conn.execute(
             "UPDATE sessions
              SET channel = ?,
@@ -169,7 +176,7 @@ impl GatewayStore {
     }
 
     pub async fn list(&self, limit: usize) -> Result<Vec<(String, SessionMapping)>> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let mut rows = conn
             .query(
                 "SELECT routing_key, session_id, title, channel, peer_id, chat_type, channel_meta, created_at, updated_at
@@ -196,7 +203,7 @@ impl GatewayStore {
     }
 
     pub async fn delete(&self, routing_key: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         conn.execute("DELETE FROM sessions WHERE routing_key = ?", [routing_key])
             .await
             .context("failed to delete routing key")?;
@@ -206,7 +213,7 @@ impl GatewayStore {
 
     pub async fn prune(&self, max_age_ms: i64) -> Result<usize> {
         let cutoff = now_millis() - max_age_ms;
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let deleted = conn
             .execute("DELETE FROM sessions WHERE updated_at < ?", [cutoff])
             .await
@@ -226,7 +233,7 @@ impl GatewayStore {
         let expires_at = delivered_at + (ttl_hours as i64 * 60 * 60 * 1000);
         let context_json = serde_json::to_string(context).context("failed to serialize context")?;
 
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         conn.execute(
             "INSERT OR REPLACE INTO delivery_context
              (channel, target_key, context, delivered_at, expires_at)
@@ -250,22 +257,22 @@ impl GatewayStore {
         channel: &str,
         target_key: &str,
     ) -> Result<Option<serde_json::Value>> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
 
         let mut rows = conn
             .query(
-                "SELECT context, expires_at
-                 FROM delivery_context
-                 WHERE channel = ? AND target_key = ?",
+                "DELETE FROM delivery_context
+                 WHERE channel = ? AND target_key = ?
+                 RETURNING context, expires_at",
                 (channel, target_key),
             )
             .await
-            .context("failed to fetch delivery context")?;
+            .context("failed to atomically pop delivery context")?;
 
         let Some(row) = rows
             .next()
             .await
-            .context("failed to read delivery context row")?
+            .context("failed to read popped delivery context row")?
         else {
             return Ok(None);
         };
@@ -274,13 +281,6 @@ impl GatewayStore {
         let expires_at: i64 = row
             .get(1)
             .context("failed to parse delivery context expiry")?;
-
-        conn.execute(
-            "DELETE FROM delivery_context WHERE channel = ? AND target_key = ?",
-            (channel, target_key),
-        )
-        .await
-        .context("failed to remove delivery context")?;
 
         if expires_at <= now_millis() {
             return Ok(None);
@@ -292,7 +292,7 @@ impl GatewayStore {
     }
 
     pub async fn prune_delivery_contexts(&self) -> Result<usize> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         let deleted = conn
             .execute(
                 "DELETE FROM delivery_context WHERE expires_at <= ?",
@@ -305,7 +305,7 @@ impl GatewayStore {
     }
 
     async fn run_migrations(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
+        let conn = self.connection()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS sessions (
@@ -584,6 +584,34 @@ mod tests {
             .await
             .expect("second pop");
         assert!(popped_again.is_none());
+    }
+
+    #[tokio::test]
+    async fn pop_delivery_context_is_atomic_under_concurrency() {
+        let store = GatewayStore::open_in_memory().await.expect("store");
+
+        store
+            .set_delivery_context(
+                "telegram",
+                "telegram:chat:1",
+                &json!({"trigger": "cleanup"}),
+                4,
+            )
+            .await
+            .expect("set_delivery_context");
+
+        let (first, second) = tokio::join!(
+            store.pop_delivery_context("telegram", "telegram:chat:1"),
+            store.pop_delivery_context("telegram", "telegram:chat:1")
+        );
+
+        let first = first.expect("first pop");
+        let second = second.expect("second pop");
+        let popped_count = [first, second].into_iter().flatten().count();
+        assert_eq!(
+            popped_count, 1,
+            "delivery context should be consumed exactly once"
+        );
     }
 
     #[tokio::test]

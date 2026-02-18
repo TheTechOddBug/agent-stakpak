@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -146,10 +145,9 @@ pub enum AutopilotScheduleCommands {
         #[arg(long, default_value_t = ScheduleTriggerOn::Failure)]
         trigger_on: ScheduleTriggerOn,
 
-        /// Working directory for this schedule
-        #[arg(long)]
-        workdir: Option<String>,
-
+        // /// Working directory for this schedule
+        // #[arg(long)]
+        // workdir: Option<String>,
         /// Max agent steps
         #[arg(long, default_value_t = 50)]
         max_steps: u32,
@@ -161,6 +159,10 @@ pub enum AutopilotScheduleCommands {
         /// Require approval before acting
         #[arg(long, default_value_t = false)]
         pause_on_approval: bool,
+
+        /// Run agent tool calls inside a sandboxed warden container
+        #[arg(long, default_value_t = false)]
+        sandbox: bool,
 
         /// Enable immediately
         #[arg(long, default_value_t = true)]
@@ -217,7 +219,7 @@ pub enum AutopilotChannelCommands {
 
     /// Add a channel
     #[command(
-        after_long_help = "HOW TO GET TOKENS:\n\n  Slack (requires both --bot-token and --app-token):\n    1. Create app at https://api.slack.com/apps\n    2. Enable Socket Mode → generate app-level token (xapp-...) with connections:write scope\n    3. OAuth & Permissions → add scopes: app_mentions:read, chat:write, im:history, im:read, im:write\n    4. Event Subscriptions → subscribe to: app_mention, message.im\n    5. Install to Workspace → copy Bot User OAuth Token (xoxb-...)\n\n  Telegram:\n    1. Message @BotFather on Telegram\n    2. Send /newbot → choose name and username (must end in 'bot')\n    3. Copy the bot token (format: 123456789:ABCdef...)\n\n  Discord:\n    1. Create app at https://discord.com/developers/applications\n    2. Bot tab → copy the bot token\n    3. OAuth2 → enable bot scope and required permissions\n"
+        after_long_help = "HOW TO GET TOKENS:\n\n  Slack (requires both --bot-token and --app-token):\n    1. Create app at https://api.slack.com/apps\n    2. Enable Socket Mode → generate app-level token (xapp-...) with connections:write scope\n    3. OAuth & Permissions → add scopes: app_mentions:read, chat:write, im:history, im:read, im:write\n    4. Event Subscriptions → subscribe to: app_mention, message.im\n    5. Install to Workspace → copy Bot User OAuth Token (xoxb-...)\n\n  Telegram:\n    1. Message @BotFather on Telegram\n    2. Send /newbot → choose name and username (must end in 'bot')\n    3. Copy the bot token (format: 123456789:ABCdef...)\n\n  Discord:\n    1. Create app at https://discord.com/developers/applications\n    2. Bot tab → copy the bot token\n    3. OAuth2 → enable bot scope and required permissions\n\n  Optional default notification target:\n    --target sets [notifications].channel/chat_id for watch alerts\n    Example: --target \"#engineering\" (Slack)\n"
     )]
     Add {
         /// Channel type (slack, telegram, discord)
@@ -235,6 +237,10 @@ pub enum AutopilotChannelCommands {
         /// Slack app token (xapp-...)
         #[arg(long)]
         app_token: Option<String>,
+
+        /// Default notification target (Slack channel, Telegram chat_id, Discord channel_id)
+        #[arg(long)]
+        target: Option<String>,
     },
 
     /// Remove a channel
@@ -323,8 +329,6 @@ struct AutopilotConfigFile {
     server: AutopilotServerConfig,
     #[serde(default)]
     schedules: Vec<AutopilotScheduleConfig>,
-    #[serde(default)]
-    channels: BTreeMap<String, AutopilotChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,29 +354,16 @@ struct AutopilotScheduleConfig {
     check: Option<String>,
     #[serde(default)]
     trigger_on: ScheduleTriggerOn,
-    #[serde(default)]
-    workdir: Option<String>,
+    // #[serde(default)]
+    // workdir: Option<String>,
     #[serde(default = "default_schedule_max_steps")]
     max_steps: u32,
     #[serde(default)]
     channel: Option<String>,
     #[serde(default)]
     pause_on_approval: bool,
-    #[serde(default = "default_enabled")]
-    enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AutopilotChannelConfig {
-    #[serde(rename = "type")]
-    channel_type: ChannelType,
     #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    token_env: Option<String>,
-    target: String,
-    #[serde(default)]
-    alerts_only: bool,
+    sandbox: bool,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -434,11 +425,43 @@ impl AutopilotConfigFile {
                 .map_err(|e| format!("Failed to create autopilot config dir: {}", e))?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize autopilot config: {}", e))?;
+        let mut root = load_toml_root_table(path)?;
 
-        std::fs::write(path, content)
-            .map_err(|e| format!("Failed to write autopilot config {}: {}", path.display(), e))
+        {
+            let server = ensure_toml_table(&mut root, "server");
+            server.insert(
+                "listen".to_string(),
+                toml::Value::String(self.server.listen.clone()),
+            );
+            server.insert(
+                "show_token".to_string(),
+                toml::Value::Boolean(self.server.show_token),
+            );
+            server.insert(
+                "no_auth".to_string(),
+                toml::Value::Boolean(self.server.no_auth),
+            );
+            match &self.server.model {
+                Some(model) => {
+                    server.insert("model".to_string(), toml::Value::String(model.clone()));
+                }
+                None => {
+                    server.remove("model");
+                }
+            }
+            server.insert(
+                "auto_approve_all".to_string(),
+                toml::Value::Boolean(self.server.auto_approve_all),
+            );
+        }
+
+        root.insert(
+            "schedules".to_string(),
+            toml::Value::try_from(&self.schedules)
+                .map_err(|e| format!("Failed to serialize schedules: {}", e))?,
+        );
+
+        write_toml_root_table(path, root)
     }
 
     fn find_schedule(&self, name: &str) -> Option<&AutopilotScheduleConfig> {
@@ -484,6 +507,56 @@ fn default_enabled() -> bool {
 
 fn default_schedule_max_steps() -> u32 {
     50
+}
+
+fn load_toml_root_table(path: &Path) -> Result<toml::value::Table, String> {
+    if !path.exists() {
+        return Ok(toml::value::Table::new());
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read autopilot config {}: {}", path.display(), e))?;
+
+    let value: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("Failed to parse autopilot config {}: {}", path.display(), e))?;
+
+    match value {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(format!(
+            "Failed to parse autopilot config {}: top-level TOML value must be a table",
+            path.display()
+        )),
+    }
+}
+
+fn ensure_toml_table<'a>(
+    table: &'a mut toml::value::Table,
+    key: &str,
+) -> &'a mut toml::value::Table {
+    if !matches!(table.get(key), Some(toml::Value::Table(_))) {
+        table.insert(
+            key.to_string(),
+            toml::Value::Table(toml::value::Table::new()),
+        );
+    }
+
+    match table.get_mut(key) {
+        Some(toml::Value::Table(subtable)) => subtable,
+        _ => unreachable!("table key was just initialized"),
+    }
+}
+
+fn write_toml_root_table(path: &Path, root: toml::value::Table) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create autopilot config dir: {}", e))?;
+    }
+
+    let content = toml::to_string_pretty(&toml::Value::Table(root))
+        .map_err(|e| format!("Failed to serialize autopilot config: {}", e))?;
+
+    std::fs::write(path, content)
+        .map_err(|e| format!("Failed to write autopilot config {}: {}", path.display(), e))
 }
 
 impl StartOptions {
@@ -812,14 +885,8 @@ async fn start_foreground_runtime(
             .try_init();
     }
 
-    // --- 1. Schedule runtime ---
-    let schedule_task = tokio::spawn(async {
-        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
-            eprintln!("Schedule runtime exited: {}", error);
-        }
-    });
-
-    // --- 2. Server runtime ---
+    // --- 1. Server runtime (initialize before scheduler to avoid sqlite3Close/sqlite3_open
+    //     race on libsql's global state when run_scheduler exits early) ---
     let bind = options.bind.clone();
     let (auth_config, generated_auth_token) = if options.no_auth {
         (stakpak_server::AuthConfig::disabled(), None)
@@ -918,8 +985,8 @@ async fn start_foreground_runtime(
     };
 
     let mcp_init_config = crate::commands::agent::run::mcp_init::McpInitConfig {
-        redact_secrets: true,
-        privacy_mode: false,
+        redact_secrets: true, // applied in proxy layer
+        privacy_mode: false,  // applied in proxy layer
         enabled_tools: stakpak_mcp_server::EnabledToolsConfig { slack: false },
         enable_mtls: true,
         enable_subagents: true,
@@ -972,8 +1039,21 @@ async fn start_foreground_runtime(
         Some(mcp_init_result.proxy_shutdown_tx),
     );
 
-    // --- 3. Gateway runtime ---
-    let config_path = AutopilotConfigFile::path();
+    // --- 1b. Sandbox configuration (warden + container image) ---
+    let warden_path = crate::commands::warden::get_warden_plugin_path().await;
+    let stakpak_image = crate::commands::warden::stakpak_agent_image();
+    let volumes = crate::commands::warden::prepare_volumes(config, false);
+    // Pre-create named volumes to prevent race conditions when parallel sandboxes start
+    stakpak_shared::container::ensure_named_volumes_exist();
+    let sandbox_config = stakpak_server::SandboxConfig {
+        warden_path,
+        image: stakpak_image.clone(),
+        volumes,
+    };
+    tracing::info!(image = %stakpak_image, warden = %sandbox_config.warden_path, "Sandbox config initialized");
+    let app_state = app_state.with_sandbox(sandbox_config);
+
+    // --- 2. Loopback connection for schedule + gateway runtimes ---
     let loopback_url = loopback_server_url(listener_addr);
     let loopback_token = if options.no_auth {
         String::new()
@@ -981,9 +1061,12 @@ async fn start_foreground_runtime(
         generated_auth_token.clone().unwrap_or_default()
     };
 
+    // --- 3. Gateway runtime ---
+    let config_path = AutopilotConfigFile::path();
+
     let gateway_cli = stakpak_gateway::GatewayCliFlags {
-        url: Some(loopback_url),
-        token: Some(loopback_token),
+        url: Some(loopback_url.clone()),
+        token: Some(loopback_token.clone()),
         ..Default::default()
     };
 
@@ -1036,6 +1119,10 @@ async fn start_foreground_runtime(
 
     let shutdown_state = app_state.clone();
     let shutdown_refresh_tx = refresh_shutdown_tx.clone();
+    let server_model_id = app_state
+        .default_model
+        .as_ref()
+        .map(|m| format!("{}/{}", m.provider, m.id));
 
     let base_app = stakpak_server::router(app_state, auth_config);
     let app = if let Some(gateway_runtime) = gateway_runtime.as_ref() {
@@ -1056,6 +1143,19 @@ async fn start_foreground_runtime(
         None
     };
     let gateway_cancel_for_shutdown = gateway_cancel.clone();
+
+    // --- 4. Schedule runtime (spawned AFTER all SQLite initialization to avoid
+    //     sqlite3Close/sqlite3_open race in libsql on musl) ---
+    let schedule_server = crate::commands::watch::AgentServerConnection {
+        url: loopback_url,
+        token: loopback_token,
+        model: server_model_id,
+    };
+    let schedule_task = tokio::spawn(async move {
+        if let Err(error) = crate::commands::watch::commands::run_scheduler(schedule_server).await {
+            eprintln!("Schedule runtime exited: {}", error);
+        }
+    });
 
     // --- Print status ---
     println!("Autopilot running in foreground. Press Ctrl+C to stop.");
@@ -1251,7 +1351,7 @@ async fn stop_autopilot() -> Result<(), String> {
                     .db_path()
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
-                    .join("watch.pid");
+                    .join("autopilot.pid");
                 let _ = std::fs::remove_file(&pid_file);
             }
         }
@@ -1270,17 +1370,20 @@ async fn stop_autopilot() -> Result<(), String> {
 }
 
 async fn restart_autopilot() -> Result<(), String> {
-    // 1. Validate the full autopilot config (server, schedules, channels)
+    // 1. Validate the autopilot config (server + schedules)
     println!("Validating autopilot configuration...");
     let autopilot_config = AutopilotConfigFile::load_or_default()?;
 
     for schedule in &autopilot_config.schedules {
         validate_schedule(schedule)?;
     }
+    let config_path = AutopilotConfigFile::path();
+    let channel_count = gateway_channel_count(config_path.as_path())?;
+
     println!(
         "  ✓ {} schedule(s), {} channel(s), server listen={}",
         autopilot_config.schedules.len(),
-        autopilot_config.channels.len(),
+        channel_count,
         autopilot_config.server.listen,
     );
 
@@ -1332,10 +1435,11 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
             prompt,
             check,
             trigger_on,
-            workdir,
+            // workdir,
             max_steps,
             channel,
             pause_on_approval,
+            sandbox,
             enabled,
         } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
@@ -1345,36 +1449,45 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
                 prompt,
                 check,
                 trigger_on,
-                workdir,
+                // workdir,
                 max_steps,
                 channel,
                 pause_on_approval,
+                sandbox,
                 enabled,
             };
             add_schedule_in_config(&mut config, schedule)?;
             config.save()?;
-            println!("✓ Schedule '{}' added", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "added", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Remove { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             remove_schedule_in_config(&mut config, &name)?;
             config.save()?;
-            println!("✓ Schedule '{}' removed", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "removed", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Enable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, true)?;
             config.save()?;
-            println!("✓ Schedule '{}' enabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "enabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Disable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, false)?;
             config.save()?;
-            println!("✓ Schedule '{}' disabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "disabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Trigger { name, dry_run } => {
@@ -1449,15 +1562,125 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
     }
 }
 
+fn require_non_empty_token(token: String, error_message: &str) -> Result<String, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err(error_message.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn add_channel_with_optional_target(
+    config_path: &Path,
+    channel_type: ChannelType,
+    token: Option<String>,
+    bot_token: Option<String>,
+    app_token: Option<String>,
+    target: Option<String>,
+) -> Result<Option<String>, String> {
+    let had_target = target.is_some();
+    let normalized_target = target
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if had_target && normalized_target.is_none() {
+        return Err("Target cannot be empty".to_string());
+    }
+
+    let mut root = load_toml_root_table(config_path)?;
+
+    {
+        let channels = ensure_toml_table(&mut root, "channels");
+
+        match &channel_type {
+            ChannelType::Telegram => {
+                let raw_token = token.or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok()).ok_or(
+                    "Telegram token required. Use --token or set TELEGRAM_BOT_TOKEN\n\n  To get a token: message @BotFather on Telegram → /newbot → copy the bot token",
+                )?;
+                let tok = require_non_empty_token(
+                    raw_token,
+                    "Telegram token cannot be empty. Use --token or set TELEGRAM_BOT_TOKEN",
+                )?;
+
+                let mut telegram = toml::value::Table::new();
+                telegram.insert("token".to_string(), toml::Value::String(tok));
+                telegram.insert("require_mention".to_string(), toml::Value::Boolean(false));
+                channels.insert("telegram".to_string(), toml::Value::Table(telegram));
+            }
+            ChannelType::Discord => {
+                let raw_token = token.or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()).ok_or(
+                    "Discord token required. Use --token or set DISCORD_BOT_TOKEN\n\n  To get a token: https://discord.com/developers/applications → create app → Bot tab → copy token",
+                )?;
+                let tok = require_non_empty_token(
+                    raw_token,
+                    "Discord token cannot be empty. Use --token or set DISCORD_BOT_TOKEN",
+                )?;
+
+                let mut discord = toml::value::Table::new();
+                discord.insert("token".to_string(), toml::Value::String(tok));
+                discord.insert("guilds".to_string(), toml::Value::Array(Vec::new()));
+                channels.insert("discord".to_string(), toml::Value::Table(discord));
+            }
+            ChannelType::Slack => {
+                let raw_bot = bot_token.or_else(|| std::env::var("SLACK_BOT_TOKEN").ok()).ok_or(
+                    "Slack bot token required. Use --bot-token or set SLACK_BOT_TOKEN\n\n  To get tokens: https://api.slack.com/apps → create app → enable Socket Mode\n  → OAuth & Permissions → Install to Workspace → copy Bot User OAuth Token (xoxb-...)",
+                )?;
+                let raw_app = app_token.or_else(|| std::env::var("SLACK_APP_TOKEN").ok()).ok_or(
+                    "Slack app token required. Use --app-token or set SLACK_APP_TOKEN\n\n  To get tokens: https://api.slack.com/apps → your app → Socket Mode\n  → generate app-level token with connections:write scope (xapp-...)",
+                )?;
+                let bot = require_non_empty_token(
+                    raw_bot,
+                    "Slack bot token cannot be empty. Use --bot-token or set SLACK_BOT_TOKEN",
+                )?;
+                let app = require_non_empty_token(
+                    raw_app,
+                    "Slack app token cannot be empty. Use --app-token or set SLACK_APP_TOKEN",
+                )?;
+
+                let mut slack = toml::value::Table::new();
+                slack.insert("bot_token".to_string(), toml::Value::String(bot));
+                slack.insert("app_token".to_string(), toml::Value::String(app));
+                channels.insert("slack".to_string(), toml::Value::Table(slack));
+            }
+            _ => return Err(format!("{:?} is not supported yet", channel_type)),
+        }
+    }
+
+    if let Some(target_value) = normalized_target.as_deref() {
+        apply_default_notification_target(&mut root, &channel_type.to_string(), target_value)?;
+    }
+
+    write_toml_root_table(config_path, root)?;
+
+    Ok(normalized_target)
+}
+
+fn remove_channel(config_path: &Path, channel_type: ChannelType) -> Result<(), String> {
+    let mut config = stakpak_gateway::GatewayConfig::load_unvalidated(
+        config_path,
+        &stakpak_gateway::GatewayCliFlags::default(),
+    )
+    .map_err(|e| format!("Failed to load config: {e}"))?;
+
+    match &channel_type {
+        ChannelType::Telegram => config.channels.telegram = None,
+        ChannelType::Discord => config.channels.discord = None,
+        ChannelType::Slack => config.channels.slack = None,
+        _ => return Err(format!("{:?} is not supported yet", channel_type)),
+    }
+
+    config
+        .save(config_path)
+        .map_err(|e| format!("Failed to save config: {e}"))?;
+
+    Ok(())
+}
+
 async fn run_channel_command(command: AutopilotChannelCommands) -> Result<(), String> {
     let config_path = AutopilotConfigFile::path();
     match command {
         AutopilotChannelCommands::List => {
-            let config = stakpak_gateway::GatewayConfig::load(
-                config_path.as_path(),
-                &stakpak_gateway::GatewayCliFlags::default(),
-            )
-            .unwrap_or_default();
+            let config = load_gateway_config_allowing_no_channels(config_path.as_path())?;
 
             let channels = config.enabled_channels();
             if channels.is_empty() {
@@ -1485,75 +1708,30 @@ async fn run_channel_command(command: AutopilotChannelCommands) -> Result<(), St
             token,
             bot_token,
             app_token,
+            target,
         } => {
-            let mut config = stakpak_gateway::GatewayConfig::load(
+            let saved_target = add_channel_with_optional_target(
                 config_path.as_path(),
-                &stakpak_gateway::GatewayCliFlags::default(),
-            )
-            .unwrap_or_default();
+                channel_type.clone(),
+                token,
+                bot_token,
+                app_token,
+                target,
+            )?;
 
-            match channel_type {
-                ChannelType::Telegram => {
-                    let tok = token
-                        .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
-                        .ok_or("Telegram token required. Use --token or set TELEGRAM_BOT_TOKEN\n\n  To get a token: message @BotFather on Telegram → /newbot → copy the bot token")?;
-                    config.channels.telegram = Some(stakpak_gateway::config::TelegramConfig {
-                        token: tok,
-                        require_mention: false,
-                    });
-                }
-                ChannelType::Discord => {
-                    let tok = token
-                        .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())
-                        .ok_or("Discord token required. Use --token or set DISCORD_BOT_TOKEN\n\n  To get a token: https://discord.com/developers/applications → create app → Bot tab → copy token")?;
-                    config.channels.discord = Some(stakpak_gateway::config::DiscordConfig {
-                        token: tok,
-                        guilds: Vec::new(),
-                    });
-                }
-                ChannelType::Slack => {
-                    let bot = bot_token
-                        .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())
-                        .ok_or(
-                            "Slack bot token required. Use --bot-token or set SLACK_BOT_TOKEN\n\n  To get tokens: https://api.slack.com/apps → create app → enable Socket Mode\n  → OAuth & Permissions → Install to Workspace → copy Bot User OAuth Token (xoxb-...)",
-                        )?;
-                    let app = app_token
-                        .or_else(|| std::env::var("SLACK_APP_TOKEN").ok())
-                        .ok_or(
-                            "Slack app token required. Use --app-token or set SLACK_APP_TOKEN\n\n  To get tokens: https://api.slack.com/apps → your app → Socket Mode\n  → generate app-level token with connections:write scope (xapp-...)",
-                        )?;
-                    config.channels.slack = Some(stakpak_gateway::config::SlackConfig {
-                        bot_token: bot,
-                        app_token: app,
-                    });
-                }
-                _ => return Err(format!("{:?} is not supported yet", channel_type)),
+            if let Some(target_value) = saved_target {
+                println!(
+                    "✓ Default notification target set for {}: {}",
+                    channel_type, target_value
+                );
             }
 
-            config
-                .save(config_path.as_path())
-                .map_err(|e| format!("Failed to save config: {e}"))?;
-            println!("✓ Channel {:?} added", channel_type);
+            println!("✓ Channel {} added", channel_type);
             Ok(())
         }
         AutopilotChannelCommands::Remove { channel_type } => {
-            let mut config = stakpak_gateway::GatewayConfig::load(
-                config_path.as_path(),
-                &stakpak_gateway::GatewayCliFlags::default(),
-            )
-            .map_err(|e| format!("Failed to load config: {e}"))?;
-
-            match channel_type {
-                ChannelType::Telegram => config.channels.telegram = None,
-                ChannelType::Discord => config.channels.discord = None,
-                ChannelType::Slack => config.channels.slack = None,
-                _ => return Err(format!("{:?} is not supported yet", channel_type)),
-            }
-
-            config
-                .save(config_path.as_path())
-                .map_err(|e| format!("Failed to save config: {e}"))?;
-            println!("✓ Channel {:?} removed", channel_type);
+            remove_channel(config_path.as_path(), channel_type.clone())?;
+            println!("✓ Channel {} removed", channel_type);
             Ok(())
         }
         AutopilotChannelCommands::Test => {
@@ -1620,6 +1798,13 @@ fn validate_schedule(schedule: &AutopilotScheduleConfig) -> Result<(), String> {
         return Err("Schedule name cannot be empty".to_string());
     }
 
+    if schedule.name.trim() == crate::commands::watch::RELOAD_SENTINEL {
+        return Err(format!(
+            "Schedule name '{}' is reserved",
+            crate::commands::watch::RELOAD_SENTINEL
+        ));
+    }
+
     Cron::from_str(&schedule.cron)
         .map_err(|e| format!("Invalid cron expression '{}': {}", schedule.cron, e))?;
 
@@ -1668,81 +1853,141 @@ fn set_schedule_enabled_in_config(
     Ok(())
 }
 
-#[cfg(test)]
-fn validate_channel(name: &str, channel: &AutopilotChannelConfig) -> Result<(), String> {
-    if name.trim().is_empty() {
-        return Err("Channel name cannot be empty".to_string());
+fn print_schedule_mutation_feedback(name: &str, action: &str, signaled: bool) {
+    if is_autopilot_running().is_some() {
+        if signaled {
+            println!("✓ Schedule '{}' {} (takes effect within ~1s)", name, action);
+        } else {
+            println!("✓ Schedule '{}' {} (takes effect within ~5s)", name, action);
+        }
+    } else {
+        println!(
+            "✓ Schedule '{}' {} (takes effect when autopilot starts)",
+            name, action
+        );
     }
-
-    if channel.target.trim().is_empty() {
-        return Err("Channel target cannot be empty".to_string());
-    }
-
-    let has_token = channel
-        .token
-        .as_deref()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-
-    let has_token_env = channel
-        .token_env
-        .as_deref()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-
-    if channel.token.is_some() && !has_token {
-        return Err("Channel --token cannot be empty".to_string());
-    }
-
-    if channel.token_env.is_some() && !has_token_env {
-        return Err("Channel --token-env cannot be empty".to_string());
-    }
-
-    if !has_token && !has_token_env && channel.channel_type != ChannelType::Webhook {
-        return Err("Channel requires either --token or --token-env".to_string());
-    }
-
-    Ok(())
 }
 
-#[cfg(test)]
-fn add_channel_in_config(
-    config: &mut AutopilotConfigFile,
-    name: &str,
-    channel: AutopilotChannelConfig,
+async fn signal_scheduler_reload() -> bool {
+    let db_path = match autopilot_db_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    let db = match crate::commands::watch::ScheduleDb::new(&db_path).await {
+        Ok(db) => db,
+        Err(_) => return false,
+    };
+
+    db.request_config_reload().await.is_ok()
+}
+
+fn autopilot_db_path() -> Result<String, String> {
+    let config = crate::commands::watch::ScheduleConfig::load_default()
+        .map_err(|error| format!("Failed to load watch config: {}", error))?;
+    let db_path = config.db_path();
+
+    db_path
+        .to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| "Invalid db path".to_string())
+}
+
+#[derive(Debug, Clone)]
+struct NotificationDefaults {
+    channel: String,
+    chat_id: Option<String>,
+}
+
+fn load_notification_defaults(path: &Path) -> Result<NotificationDefaults, String> {
+    let root = load_toml_root_table(path)?;
+    let notifications = root
+        .get("notifications")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "Notifications are not configured".to_string())?;
+
+    let channel = notifications
+        .get("channel")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "Notifications channel is not configured".to_string())?
+        .to_string();
+
+    let chat_id = notifications
+        .get("chat_id")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+
+    Ok(NotificationDefaults { channel, chat_id })
+}
+
+fn resolve_default_gateway_url(root: &toml::value::Table) -> String {
+    root.get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("listen"))
+        .and_then(toml::Value::as_str)
+        .map(loopback_base_url_from_bind)
+        .unwrap_or_else(|| "http://127.0.0.1:4096".to_string())
+}
+
+fn apply_default_notification_target(
+    root: &mut toml::value::Table,
+    channel: &str,
+    target: &str,
 ) -> Result<(), String> {
-    validate_channel(name, &channel)?;
-
-    if config.channels.contains_key(name) {
-        return Err(format!("Channel '{}' already exists", name));
+    if channel.trim().is_empty() {
+        return Err("Channel cannot be empty".to_string());
     }
 
-    config.channels.insert(name.to_string(), channel);
+    if target.trim().is_empty() {
+        return Err("Target cannot be empty".to_string());
+    }
+
+    let default_gateway_url = resolve_default_gateway_url(root);
+
+    let notifications = ensure_toml_table(root, "notifications");
+    if !notifications.contains_key("gateway_url") {
+        notifications.insert(
+            "gateway_url".to_string(),
+            toml::Value::String(default_gateway_url),
+        );
+    }
+    notifications.insert(
+        "channel".to_string(),
+        toml::Value::String(channel.trim().to_string()),
+    );
+    notifications.insert(
+        "chat_id".to_string(),
+        toml::Value::String(target.trim().to_string()),
+    );
+
     Ok(())
 }
 
 #[cfg(test)]
-fn remove_channel_in_config(config: &mut AutopilotConfigFile, name: &str) -> Result<(), String> {
-    if config.channels.remove(name).is_none() {
-        return Err(format!("Channel '{}' not found", name));
-    }
-
-    Ok(())
+fn set_default_notification_target(path: &Path, channel: &str, target: &str) -> Result<(), String> {
+    let mut root = load_toml_root_table(path)?;
+    apply_default_notification_target(&mut root, channel, target)?;
+    write_toml_root_table(path, root)
 }
 
-#[cfg(test)]
-fn set_channel_enabled_in_config(
-    config: &mut AutopilotConfigFile,
-    name: &str,
-    enabled: bool,
-) -> Result<(), String> {
-    let channel = config
-        .channels
-        .get_mut(name)
-        .ok_or_else(|| format!("Channel '{}' not found", name))?;
+fn load_gateway_config_allowing_no_channels(
+    config_path: &Path,
+) -> Result<stakpak_gateway::GatewayConfig, String> {
+    let cli_flags = stakpak_gateway::GatewayCliFlags::default();
+    let config = stakpak_gateway::GatewayConfig::load_unvalidated(config_path, &cli_flags)
+        .map_err(|e| format!("Failed to load channel config: {e}"))?;
 
-    channel.enabled = enabled;
-    Ok(())
+    match config.validate_with_error() {
+        Ok(()) | Err(stakpak_gateway::config::GatewayConfigValidationError::MissingChannels) => {
+            Ok(config)
+        }
+        Err(error) => Err(format!("Channel config invalid: {error}")),
+    }
+}
+
+fn gateway_channel_count(config_path: &Path) -> Result<usize, String> {
+    let config = load_gateway_config_allowing_no_channels(config_path)?;
+    Ok(config.enabled_channels().len())
 }
 
 async fn status_autopilot(
@@ -1757,7 +2002,9 @@ async fn status_autopilot(
     let probe_client = build_probe_http_client();
 
     let schedules = build_schedule_statuses(&autopilot_config.schedules);
-    let channels = build_channel_statuses(&autopilot_config.channels);
+    let gateway_config = load_gateway_config_allowing_no_channels(config_path.as_path())?;
+    let notification_defaults = load_notification_defaults(config_path.as_path()).ok();
+    let channels = build_channel_statuses(&gateway_config, notification_defaults.as_ref());
 
     let service_path = autopilot_service_path();
     let service = ServiceStatusJson {
@@ -2050,10 +2297,7 @@ async fn doctor_autopilot(config: &AppConfig) -> Result<(), String> {
     let _ = &autopilot_config; // used below for schedule count
 
     let gateway_path = AutopilotConfigFile::path();
-    match stakpak_gateway::GatewayConfig::load(
-        gateway_path.as_path(),
-        &stakpak_gateway::GatewayCliFlags::default(),
-    ) {
+    match load_gateway_config_allowing_no_channels(gateway_path.as_path()) {
         Ok(cfg) => {
             let channels = cfg.enabled_channels();
             if channels.is_empty() {
@@ -2063,14 +2307,8 @@ async fn doctor_autopilot(config: &AppConfig) -> Result<(), String> {
             }
         }
         Err(e) => {
-            let err_str = e.to_string();
-            // "at least one channel" is not a real error for autopilot — channels are optional
-            if err_str.contains("at least one channel") {
-                println!("✓ No channels configured (add with: stakpak autopilot channel add)");
-            } else {
-                failures += 1;
-                println!("✗ Channel config invalid: {}", e);
-            }
+            failures += 1;
+            println!("✗ Channel config invalid: {}", e);
         }
     }
 
@@ -2299,18 +2537,48 @@ fn build_schedule_statuses(
 }
 
 fn build_channel_statuses(
-    channels: &BTreeMap<String, AutopilotChannelConfig>,
+    gateway_config: &stakpak_gateway::GatewayConfig,
+    notification_defaults: Option<&NotificationDefaults>,
 ) -> Vec<AutopilotChannelStatusJson> {
+    let mut channels = Vec::new();
+
+    if gateway_config.channels.telegram.is_some() {
+        channels.push(build_single_channel_status(
+            "telegram",
+            notification_defaults,
+        ));
+    }
+
+    if gateway_config.channels.discord.is_some() {
+        channels.push(build_single_channel_status(
+            "discord",
+            notification_defaults,
+        ));
+    }
+
+    if gateway_config.channels.slack.is_some() {
+        channels.push(build_single_channel_status("slack", notification_defaults));
+    }
+
     channels
-        .iter()
-        .map(|(name, channel)| AutopilotChannelStatusJson {
-            name: name.clone(),
-            channel_type: channel.channel_type.to_string(),
-            target: channel.target.clone(),
-            enabled: channel.enabled,
-            alerts_only: channel.alerts_only,
-        })
-        .collect()
+}
+
+fn build_single_channel_status(
+    channel_name: &str,
+    notification_defaults: Option<&NotificationDefaults>,
+) -> AutopilotChannelStatusJson {
+    let target = notification_defaults
+        .filter(|defaults| defaults.channel == channel_name)
+        .and_then(|defaults| defaults.chat_id.clone())
+        .unwrap_or_else(|| "-".to_string());
+
+    AutopilotChannelStatusJson {
+        name: channel_name.to_string(),
+        channel_type: channel_name.to_string(),
+        target,
+        enabled: true,
+        alerts_only: false,
+    }
 }
 
 fn next_run_for_cron(cron: &str, enabled: bool) -> Option<String> {
@@ -2448,7 +2716,7 @@ fn is_autopilot_running() -> Option<u32> {
         .db_path()
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join("watch.pid");
+        .join("autopilot.pid");
     let pid_str = std::fs::read_to_string(&pid_file).ok()?;
     let pid: u32 = pid_str.trim().parse().ok()?;
     if crate::commands::watch::is_process_running(pid) {
@@ -2861,21 +3129,11 @@ mod tests {
             prompt: "Check infra".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
-            enabled: true,
-        }
-    }
-
-    fn sample_channel(channel_type: ChannelType) -> AutopilotChannelConfig {
-        AutopilotChannelConfig {
-            channel_type,
-            token: Some("token".to_string()),
-            token_env: None,
-            target: "#infra".to_string(),
-            alerts_only: false,
+            sandbox: false,
             enabled: true,
         }
     }
@@ -2923,6 +3181,17 @@ mod tests {
     }
 
     #[test]
+    fn schedule_reserved_name_rejected() {
+        let mut config = AutopilotConfigFile::default();
+        let schedule = sample_schedule(crate::commands::watch::RELOAD_SENTINEL);
+
+        let result = add_schedule_in_config(&mut config, schedule);
+        assert!(result.is_err());
+        let message = result.expect_err("reserved schedule name should be rejected");
+        assert!(message.contains("reserved"));
+    }
+
+    #[test]
     fn history_limit_is_bounded() {
         assert_eq!(bounded_history_limit(0), 1);
         assert_eq!(bounded_history_limit(20), 20);
@@ -2930,176 +3199,275 @@ mod tests {
     }
 
     #[test]
-    fn channel_add_remove_enable_disable_happy_path() {
-        let mut config = AutopilotConfigFile::default();
-
-        let add = add_channel_in_config(&mut config, "slack", sample_channel(ChannelType::Slack));
-        assert!(add.is_ok());
-        assert_eq!(config.channels.len(), 1);
-
-        let disable = set_channel_enabled_in_config(&mut config, "slack", false);
-        assert!(disable.is_ok());
-        assert!(
-            !config
-                .channels
-                .get("slack")
-                .map(|ch| ch.enabled)
-                .unwrap_or(true)
-        );
-
-        let enable = set_channel_enabled_in_config(&mut config, "slack", true);
-        assert!(enable.is_ok());
-        assert!(
-            config
-                .channels
-                .get("slack")
-                .map(|ch| ch.enabled)
-                .unwrap_or(false)
-        );
-
-        let remove = remove_channel_in_config(&mut config, "slack");
-        assert!(remove.is_ok());
-        assert!(!config.channels.contains_key("slack"));
-    }
-
-    #[test]
-    fn channel_duplicate_name_rejected() {
-        let mut config = AutopilotConfigFile::default();
-
-        let first = add_channel_in_config(&mut config, "slack", sample_channel(ChannelType::Slack));
-        assert!(first.is_ok());
-
-        let duplicate =
-            add_channel_in_config(&mut config, "slack", sample_channel(ChannelType::Slack));
-        assert!(duplicate.is_err());
-    }
-
-    #[test]
-    fn channel_token_validation_rules() {
-        let mut config = AutopilotConfigFile::default();
-
-        let invalid = add_channel_in_config(
-            &mut config,
-            "slack",
-            AutopilotChannelConfig {
-                channel_type: ChannelType::Slack,
-                token: None,
-                token_env: None,
-                target: "#infra".to_string(),
-                alerts_only: false,
-                enabled: true,
-            },
-        );
-        assert!(invalid.is_err());
-
-        let invalid_empty_token = add_channel_in_config(
-            &mut config,
-            "slack-empty-token",
-            AutopilotChannelConfig {
-                channel_type: ChannelType::Slack,
-                token: Some("   ".to_string()),
-                token_env: None,
-                target: "#infra".to_string(),
-                alerts_only: false,
-                enabled: true,
-            },
-        );
-        assert!(invalid_empty_token.is_err());
-
-        let invalid_empty_token_env = add_channel_in_config(
-            &mut config,
-            "slack-empty-token-env",
-            AutopilotChannelConfig {
-                channel_type: ChannelType::Slack,
-                token: None,
-                token_env: Some("".to_string()),
-                target: "#infra".to_string(),
-                alerts_only: false,
-                enabled: true,
-            },
-        );
-        assert!(invalid_empty_token_env.is_err());
-
-        let valid_with_env = add_channel_in_config(
-            &mut config,
-            "slack",
-            AutopilotChannelConfig {
-                channel_type: ChannelType::Slack,
-                token: None,
-                token_env: Some("SLACK_BOT_TOKEN".to_string()),
-                target: "#infra".to_string(),
-                alerts_only: false,
-                enabled: true,
-            },
-        );
-        assert!(valid_with_env.is_ok());
-
-        let webhook_without_token = add_channel_in_config(
-            &mut config,
-            "hook",
-            AutopilotChannelConfig {
-                channel_type: ChannelType::Webhook,
-                token: None,
-                token_env: None,
-                target: "https://example.com/hook".to_string(),
-                alerts_only: true,
-                enabled: true,
-            },
-        );
-        assert!(webhook_without_token.is_ok());
-    }
-
-    #[test]
-    fn invalid_new_sections_do_not_fallback_to_runtime_only() {
-        let path = temp_file_path("autopilot-invalid-sections");
+    fn load_ignores_gateway_channel_schema() {
+        let path = temp_file_path("autopilot-gateway-channels");
         let write_result = std::fs::write(
             &path,
             r##"
-bind = "127.0.0.1:4096"
-show_token = false
-no_auth = false
+[server]
+listen = "127.0.0.1:4096"
 
 [channels.slack]
-type = "not-a-channel"
-target = "#infra"
-enabled = true
+bot_token = "xoxb-test"
+app_token = "xapp-test"
 "##,
         );
         assert!(write_result.is_ok());
 
         let loaded = AutopilotConfigFile::load_from_path(&path);
-        assert!(loaded.is_err());
+        assert!(loaded.is_ok());
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn server_config_save_preserves_schedules_and_channels() {
+    fn server_config_save_preserves_gateway_and_notifications_sections() {
         let path = temp_file_path("autopilot-preserve");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[server]
+listen = "127.0.0.1:4096"
+url = "http://127.0.0.1:4096"
+token = "gateway-token"
 
-        let mut config = AutopilotConfigFile::default();
-        config.schedules.push(sample_schedule("health-check"));
-        config
-            .channels
-            .insert("slack".to_string(), sample_channel(ChannelType::Slack));
+[notifications]
+gateway_url = "http://127.0.0.1:4096"
+channel = "slack"
+chat_id = "#infra"
 
-        let save_initial = config.save_to_path(&path);
-        assert!(save_initial.is_ok());
+[channels.slack]
+bot_token = "xoxb-old"
+app_token = "xapp-old"
+"##,
+        );
+        assert!(write_result.is_ok());
 
-        let mut loaded = AutopilotConfigFile::load_from_path(&path).unwrap_or_default();
+        let load_result = AutopilotConfigFile::load_from_path(&path);
+        assert!(load_result.is_ok());
+        let mut loaded = match load_result {
+            Ok(value) => value,
+            Err(error) => panic!("failed to load config: {error}"),
+        };
+
         loaded.server.auto_approve_all = true;
         let save_updated = loaded.save_to_path(&path);
         assert!(save_updated.is_ok());
 
-        let reloaded = AutopilotConfigFile::load_from_path(&path);
+        let reloaded = std::fs::read_to_string(&path);
         assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
 
-        if let Ok(reloaded) = reloaded {
-            assert_eq!(reloaded.schedules.len(), 1);
-            assert!(reloaded.find_schedule("health-check").is_some());
-            assert!(reloaded.channels.contains_key("slack"));
-            assert!(reloaded.server.auto_approve_all);
-        }
+        assert!(reloaded.contains("[channels.slack]"));
+        assert!(reloaded.contains("bot_token = \"xoxb-old\""));
+        assert!(reloaded.contains("[notifications]"));
+        assert!(reloaded.contains("channel = \"slack\""));
+        assert!(reloaded.contains("chat_id = \"#infra\""));
+        assert!(reloaded.contains("auto_approve_all = true"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_default_notification_target_merges_without_overwrite() {
+        let path = temp_file_path("autopilot-notification-target");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[server]
+listen = "127.0.0.1:4096"
+
+[[schedules]]
+name = "health-check"
+cron = "*/5 * * * *"
+prompt = "Check system health"
+
+[channels.slack]
+bot_token = "xoxb-test"
+app_token = "xapp-test"
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let set_result = set_default_notification_target(path.as_path(), "slack", "#ops");
+        assert!(set_result.is_ok());
+
+        let reloaded = std::fs::read_to_string(&path);
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
+
+        assert!(reloaded.contains("[[schedules]]"));
+        assert!(reloaded.contains("[channels.slack]"));
+        assert!(reloaded.contains("[notifications]"));
+        assert!(reloaded.contains("channel = \"slack\""));
+        assert!(reloaded.contains("chat_id = \"#ops\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn channel_add_with_target_updates_notifications() {
+        let path = temp_file_path("autopilot-channel-add-target");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[server]
+listen = "127.0.0.1:4096"
+
+[[schedules]]
+name = "health-check"
+cron = "*/5 * * * *"
+prompt = "Check system health"
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let add_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Slack,
+            None,
+            Some("xoxb-test".to_string()),
+            Some("xapp-test".to_string()),
+            Some("#eng".to_string()),
+        );
+        assert!(add_result.is_ok());
+        assert_eq!(add_result.ok(), Some(Some("#eng".to_string())));
+
+        let reloaded = std::fs::read_to_string(&path);
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
+
+        assert!(reloaded.contains("[channels.slack]"));
+        assert!(reloaded.contains("bot_token = \"xoxb-test\""));
+        assert!(reloaded.contains("app_token = \"xapp-test\""));
+        assert!(reloaded.contains("[notifications]"));
+        assert!(reloaded.contains("channel = \"slack\""));
+        assert!(reloaded.contains("chat_id = \"#eng\""));
+        assert!(reloaded.contains("[[schedules]]"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn channel_add_with_invalid_target_is_atomic() {
+        let path = temp_file_path("autopilot-channel-add-invalid-target");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[server]
+listen = "127.0.0.1:4096"
+
+[[schedules]]
+name = "health-check"
+cron = "*/5 * * * *"
+prompt = "Check system health"
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let add_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Slack,
+            None,
+            Some("xoxb-test".to_string()),
+            Some("xapp-test".to_string()),
+            Some("   ".to_string()),
+        );
+        assert!(add_result.is_err());
+
+        let reloaded = std::fs::read_to_string(&path);
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
+
+        assert!(!reloaded.contains("[channels.slack]"));
+        assert!(!reloaded.contains("[notifications]"));
+        assert!(reloaded.contains("[[schedules]]"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn channel_add_rejects_empty_tokens() {
+        let path = temp_file_path("autopilot-channel-add-empty-token");
+
+        let empty_telegram_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Telegram,
+            Some("   ".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(empty_telegram_result.is_err());
+
+        let empty_discord_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Discord,
+            Some("   ".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(empty_discord_result.is_err());
+
+        let empty_bot_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Slack,
+            None,
+            Some("   ".to_string()),
+            Some("xapp-test".to_string()),
+            None,
+        );
+        assert!(empty_bot_result.is_err());
+
+        let empty_app_result = add_channel_with_optional_target(
+            path.as_path(),
+            ChannelType::Slack,
+            None,
+            Some("xoxb-test".to_string()),
+            Some("   ".to_string()),
+            None,
+        );
+        assert!(empty_app_result.is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn channel_remove_recovers_from_invalid_channel_config() {
+        let path = temp_file_path("autopilot-channel-remove-invalid");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[channels.slack]
+bot_token = ""
+app_token = "xapp-test"
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let remove_result = remove_channel(path.as_path(), ChannelType::Slack);
+        assert!(remove_result.is_ok());
+
+        let reloaded = std::fs::read_to_string(&path);
+        assert!(reloaded.is_ok());
+        let reloaded = match reloaded {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read config: {error}"),
+        };
+        assert!(!reloaded.contains("[channels.slack]"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -3116,15 +3484,35 @@ enabled = true
             prompt: "hello".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
+            sandbox: false,
             enabled: true,
         };
         let result = add_schedule_in_config(&mut config, schedule);
         assert!(result.is_ok());
         assert!(config.find_schedule("demo").is_some());
+    }
+
+    #[test]
+    fn gateway_channel_count_surfaces_invalid_channel_config() {
+        let path = temp_file_path("autopilot-invalid-gateway-channel");
+        let write_result = std::fs::write(
+            &path,
+            r##"
+[channels.slack]
+bot_token = ""
+app_token = "xapp-test"
+"##,
+        );
+        assert!(write_result.is_ok());
+
+        let count_result = gateway_channel_count(path.as_path());
+        assert!(count_result.is_err());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -3135,6 +3523,7 @@ enabled = true
             token: None,
             bot_token: None,
             app_token: None,
+            target: None,
         })
         .await;
 

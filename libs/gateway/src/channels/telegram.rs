@@ -105,14 +105,16 @@ impl TelegramChannel {
     }
 
     async fn send_chunk(&self, chat_id: i64, thread_id: Option<i64>, text: &str) -> Result<()> {
+        const MAX_RETRIES: u32 = 5;
+
         let params = SendMessageParams {
             chat_id,
             text: text.to_string(),
-            parse_mode: None,
             reply_to_message_id: None,
             message_thread_id: thread_id,
         };
 
+        let mut retries: u32 = 0;
         loop {
             let response = self
                 .client
@@ -133,21 +135,28 @@ impl TelegramChannel {
             }
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                retries += 1;
+                if retries > MAX_RETRIES {
+                    return Err(anyhow!("telegram rate limited after {MAX_RETRIES} retries"));
+                }
                 let retry_after = payload
                     .parameters
                     .as_ref()
-                    .and_then(|params| params.retry_after)
+                    .and_then(|p| p.retry_after)
                     .unwrap_or(1);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after as u64)).await;
+                let wait = u64::try_from(retry_after.max(1)).unwrap_or(1);
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 continue;
             }
+
+            let description = payload
+                .description
+                .unwrap_or_else(|| "unknown error".to_string());
 
             return Err(anyhow!(
                 "telegram sendMessage error {}: {}",
                 payload.error_code.unwrap_or_default(),
-                payload
-                    .description
-                    .unwrap_or_else(|| "unknown error".to_string())
+                description
             ));
         }
     }
@@ -307,17 +316,25 @@ fn parse_i64_value(value: &serde_json::Value) -> Option<i64> {
 
 #[derive(Debug, Serialize)]
 struct GetUpdatesParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<i64>,
     timeout: i64,
     allowed_updates: Vec<String>,
 }
 
+/// Telegram Bot API `sendMessage` parameters.
+///
+/// Optional fields use `skip_serializing_if` because Telegram's Bot API rejects
+/// `null` values — it expects optional fields to be **omitted entirely** from the
+/// JSON body, not sent as `"field": null`. Without this, every request with a
+/// `None` optional (e.g., `"parse_mode": null`) returns HTTP 400.
 #[derive(Debug, Serialize)]
 struct SendMessageParams {
     chat_id: i64,
     text: String,
-    parse_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
 }
 
@@ -374,7 +391,7 @@ struct TgChat {
 
 #[cfg(test)]
 mod tests {
-    use super::{TgResponse, TgUpdate};
+    use super::{GetUpdatesParams, SendMessageParams, TgResponse, TgUpdate};
 
     #[test]
     fn telegram_update_deserialization() {
@@ -399,5 +416,79 @@ mod tests {
 
         assert!(payload.ok);
         assert_eq!(payload.result.unwrap_or_default().len(), 1);
+    }
+
+    /// Telegram Bot API rejects `null` values — optional fields must be omitted
+    /// entirely from the JSON body. This test ensures `SendMessageParams` with
+    /// `None` optional fields produces no null values in the serialized output.
+    #[test]
+    fn send_message_params_omits_none_fields() {
+        let params = SendMessageParams {
+            chat_id: 123,
+            text: "hello".to_string(),
+            reply_to_message_id: None,
+            message_thread_id: None,
+        };
+
+        let json = serde_json::to_value(&params).expect("failed to serialize SendMessageParams");
+        let obj = json.as_object().expect("expected JSON object");
+
+        // Only required fields should be present
+        assert_eq!(obj.len(), 2, "expected only chat_id and text, got: {obj:?}");
+        assert_eq!(obj.get("chat_id").and_then(|v| v.as_i64()), Some(123));
+        assert_eq!(obj.get("text").and_then(|v| v.as_str()), Some("hello"));
+
+        // Optional fields must not appear (not even as null)
+        assert!(
+            !obj.contains_key("reply_to_message_id"),
+            "reply_to_message_id should be omitted when None"
+        );
+        assert!(
+            !obj.contains_key("message_thread_id"),
+            "message_thread_id should be omitted when None"
+        );
+    }
+
+    /// When optional fields are `Some`, they should appear in the serialized output.
+    #[test]
+    fn send_message_params_includes_some_fields() {
+        let params = SendMessageParams {
+            chat_id: 123,
+            text: "hello".to_string(),
+            reply_to_message_id: Some(42),
+            message_thread_id: Some(7),
+        };
+
+        let json = serde_json::to_value(&params).expect("failed to serialize SendMessageParams");
+        let obj = json.as_object().expect("expected JSON object");
+
+        assert_eq!(obj.len(), 4);
+        assert_eq!(
+            obj.get("reply_to_message_id").and_then(|v| v.as_i64()),
+            Some(42)
+        );
+        assert_eq!(
+            obj.get("message_thread_id").and_then(|v| v.as_i64()),
+            Some(7)
+        );
+    }
+
+    /// Same null-omission guarantee for `GetUpdatesParams`.
+    #[test]
+    fn get_updates_params_omits_none_offset() {
+        let params = GetUpdatesParams {
+            offset: None,
+            timeout: 30,
+            allowed_updates: vec!["message".to_string()],
+        };
+
+        let json = serde_json::to_value(&params).expect("failed to serialize GetUpdatesParams");
+        let obj = json.as_object().expect("expected JSON object");
+
+        assert!(
+            !obj.contains_key("offset"),
+            "offset should be omitted when None"
+        );
+        assert_eq!(obj.get("timeout").and_then(|v| v.as_i64()), Some(30));
     }
 }

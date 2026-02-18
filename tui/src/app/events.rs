@@ -156,6 +156,22 @@ pub enum InputEvent {
     RefreshBoardTasks,
     BoardTasksLoaded(FetchTasksResult),
     BoardTasksError(String),
+
+    // Ask User popup events
+    ShowAskUserPopup(
+        ToolCall,
+        Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+    ),
+    AskUserNextTab,
+    AskUserPrevTab,
+    AskUserNextOption,
+    AskUserPrevOption,
+    AskUserSelectOption,
+    AskUserCustomInputChanged(char),
+    AskUserCustomInputBackspace,
+    AskUserCustomInputDelete,
+    AskUserSubmit,
+    AskUserCancel,
 }
 
 #[derive(Debug)]
@@ -179,4 +195,6 @@ pub enum OutputEvent {
     RequestTotalUsage,
     RequestAvailableModels,
     SwitchToModel(Model),
+    /// Response from ask_user popup with the tool call and result
+    AskUserResponse(ToolCallResult),
 }

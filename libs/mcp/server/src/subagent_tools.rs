@@ -500,8 +500,12 @@ NOTES:
 
         // If sandbox mode is enabled, wrap the command in warden
         if enable_sandbox {
-            // Use standard stakpak image (no special warden image needed with wrap)
-            let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+            use stakpak_shared::container::{ensure_named_volumes_exist, stakpak_agent_image};
+
+            // Pre-create named volumes to prevent race conditions with parallel subagents
+            ensure_named_volumes_exist();
+
+            let stakpak_image = stakpak_agent_image();
 
             let mut warden_command = format!("{} warden wrap {}", current_exe, stakpak_image);
 
