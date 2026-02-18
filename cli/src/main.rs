@@ -7,6 +7,12 @@
 // kernel. This causes use-after-free SIGSEGV in libsql's sqlite3Close() when concurrent
 // threads race between Database::drop() and page reclamation. jemalloc retains freed
 // pages in its arena, preventing this class of crash.
+//
+// IMPORTANT: tikv-jemallocator must be built with `unprefixed_malloc_on_supported_platforms`
+// so jemalloc provides the actual malloc/free/calloc/realloc symbols. Without this feature,
+// jemalloc uses prefixed names (_rjem_je_malloc) and only handles Rust allocations via
+// #[global_allocator]. SQLite's embedded C code (compiled via libsql-ffi) calls the
+// system malloc() directly — which on musl is the aggressive allocator that caused the crash.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
