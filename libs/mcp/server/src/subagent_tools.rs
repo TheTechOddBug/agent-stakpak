@@ -498,7 +498,12 @@ NOTES:
 
         let mut command = args.join(" ");
 
-        // If sandbox mode is enabled, wrap the command in warden
+        // If sandbox mode is enabled, wrap the command in warden.
+        //
+        // NOTE: We only add subagent-specific volumes here (prompt file, config
+        // overlay).  All default mounts (cloud creds, SSH, working dir, aqua
+        // cache, etc.) are handled by the `warden wrap` CLI handler which calls
+        // `prepare_volumes()` → `stakpak_agent_default_mounts()` automatically.
         if enable_sandbox {
             use stakpak_shared::container::{ensure_named_volumes_exist, stakpak_agent_image};
 
@@ -513,14 +518,10 @@ NOTES:
             let warden_prompt_path = format!("/tmp/{}", prompt_filename);
             warden_command.push_str(&format!(" -v {}:{}", prompt_file_path, warden_prompt_path));
 
-            // Add default sandbox volumes for read-only access
-            // Working directory (read-only)
-            warden_command.push_str(" -v ./:/agent:ro");
-            // Session data directory (read-write for subagent state)
-            warden_command.push_str(" -v ./.stakpak:/agent/.stakpak");
-
-            // When a config path was passed, overlay it at the default location (~/.stakpak/config.toml → /agent/.stakpak/config.toml).
-            // Must come after ./.stakpak mount so the file overlays on top.
+            // When a config path was passed, overlay it at the default location
+            // (~/.stakpak/config.toml → /agent/.stakpak/config.toml).
+            // User-specified `-v` volumes are appended after `prepare_volumes()`
+            // defaults, so this overlay takes precedence.
             let container_config_path = config_path.and_then(|p| {
                 let path = Path::new(p);
                 if path.exists() && path.is_file() {
@@ -534,32 +535,6 @@ NOTES:
                     None
                 }
             });
-
-            // Cloud credentials (read-only) - only mount if they exist
-            let cloud_volumes = [
-                ("~/.aws", "/home/agent/.aws:ro"),
-                ("~/.config/gcloud", "/home/agent/.config/gcloud:ro"),
-                ("~/.azure", "/home/agent/.azure:ro"),
-                ("~/.kube", "/home/agent/.kube:ro"),
-            ];
-
-            for (host_path, container_path) in cloud_volumes {
-                // Expand ~ to home directory
-                let expanded_path = if host_path.starts_with("~/") {
-                    if let Ok(home) = std::env::var("HOME") {
-                        host_path.replacen("~", &home, 1)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    host_path.to_string()
-                };
-
-                // Only add volume if the path exists
-                if Path::new(&expanded_path).exists() {
-                    warden_command.push_str(&format!(" -v {}:{}", expanded_path, container_path));
-                }
-            }
 
             // Replace host paths in the inner command with container paths
             let inner_command = command.replace(&prompt_file_path, &warden_prompt_path);
