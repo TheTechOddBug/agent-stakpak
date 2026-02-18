@@ -298,18 +298,7 @@ pub fn update(
                 return;
             }
             InputEvent::Tab => {
-                // Switch between tabs: All <-> Reasoning
-                state.model_switcher_mode = match state.model_switcher_mode {
-                    crate::app::ModelSwitcherMode::All => crate::app::ModelSwitcherMode::Reasoning,
-                    crate::app::ModelSwitcherMode::Reasoning => crate::app::ModelSwitcherMode::All,
-                };
-                // Reset selection when switching tabs and ensure it's valid
-                let filtered = crate::services::model_switcher::filter_models(
-                    &state.available_models,
-                    state.model_switcher_mode,
-                    &state.model_switcher_search,
-                );
-                state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
+                // Tabs are hidden for now, consume the event to prevent side effects
                 return;
             }
             InputEvent::Up | InputEvent::ScrollUp => {

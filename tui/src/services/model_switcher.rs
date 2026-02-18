@@ -4,7 +4,6 @@
 //! Accessible via Ctrl+M or the /model command.
 //!
 //! Features:
-//! - Filter tabs: All | Reasoning
 //! - Search input for filtering by model name or provider
 //! - Models grouped by provider with headers
 
@@ -14,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Paragraph},
 };
 use stakai::Model;
 
@@ -101,7 +100,6 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Title
-            Constraint::Length(1), // Tabs
             Constraint::Length(3), // Search (with spacing above and below)
             Constraint::Min(3),    // List
             Constraint::Length(2), // Help text
@@ -116,23 +114,6 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
     let title_line = Line::from(Span::styled(title, title_style));
     let title_paragraph = Paragraph::new(title_line);
     f.render_widget(title_paragraph, chunks[0]);
-
-    // Render tabs
-    let tab_titles = vec![" All ", " Reasoning "];
-    let selected_tab = match state.model_switcher_mode {
-        ModelSwitcherMode::All => 0,
-        ModelSwitcherMode::Reasoning => 1,
-    };
-    let tabs = Tabs::new(tab_titles)
-        .select(selected_tab)
-        .style(Style::default().fg(Color::DarkGray))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(" | ");
-    f.render_widget(tabs, chunks[1]);
 
     // Render search input
     let search_prompt = ">";
@@ -165,7 +146,7 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
 
     let search_text = ratatui::text::Text::from(vec![Line::from(""), Line::from(search_spans)]);
     let search_paragraph = Paragraph::new(search_text);
-    f.render_widget(search_paragraph, chunks[2]);
+    f.render_widget(search_paragraph, chunks[1]);
 
     // Get filtered model indices
     let filtered_indices = filter_models(
@@ -175,7 +156,7 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
     );
 
     // Render model list
-    render_model_list(f, state, &filtered_indices, chunks[3]);
+    render_model_list(f, state, &filtered_indices, chunks[2]);
 
     // Help text
     let help = Paragraph::new(vec![
@@ -185,9 +166,6 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
             Span::raw("  "),
             Span::styled("↵", Style::default().fg(Color::DarkGray)),
             Span::styled(" select", Style::default().fg(Color::Cyan)),
-            Span::raw("  "),
-            Span::styled("tab", Style::default().fg(Color::DarkGray)),
-            Span::styled(" switch", Style::default().fg(Color::Cyan)),
             Span::raw("  "),
             Span::styled("esc", Style::default().fg(Color::DarkGray)),
             Span::styled(" cancel", Style::default().fg(Color::Cyan)),
@@ -202,10 +180,10 @@ pub fn render_model_switcher_popup(f: &mut Frame, state: &AppState) {
     ]);
 
     let help_area = Rect {
-        x: chunks[4].x + 1,
-        y: chunks[4].y,
-        width: chunks[4].width.saturating_sub(2),
-        height: chunks[4].height,
+        x: chunks[3].x + 1,
+        y: chunks[3].y,
+        width: chunks[3].width.saturating_sub(2),
+        height: chunks[3].height,
     };
     f.render_widget(help, help_area);
 
