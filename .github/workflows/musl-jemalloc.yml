@@ -50,6 +50,7 @@ jobs:
             -w /build \
             -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
             -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
+            -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
             ${{ matrix.docker }} sh -c '
               set -euo pipefail
 
