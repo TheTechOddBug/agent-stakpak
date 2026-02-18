@@ -3,6 +3,7 @@
 //! This module contains all event handlers organized by functionality.
 //! The main `update()` function routes InputEvents to the appropriate handler modules.
 
+pub mod ask_user;
 mod dialog;
 mod input;
 mod message;
@@ -354,6 +355,115 @@ pub fn update(
                 return;
             }
         }
+    }
+
+    // Intercept keys for Ask User inline block
+    // Tab toggles focus: focused = navigate inside block, unfocused = scroll freely
+    if state.show_ask_user_popup {
+        match event {
+            InputEvent::HandleEsc | InputEvent::AskUserCancel => {
+                if state.ask_user_focused {
+                    // First Esc unfocuses, second Esc cancels
+                    state.ask_user_focused = false;
+                    ask_user::refresh_ask_user_block_pub(state);
+                } else {
+                    ask_user::handle_ask_user_cancel(state, output_tx);
+                }
+                return;
+            }
+            InputEvent::Tab => {
+                // Toggle focus on the ask_user block
+                state.ask_user_focused = !state.ask_user_focused;
+                if state.ask_user_focused {
+                    // Scroll to bottom to show the block
+                    state.stay_at_bottom = true;
+                }
+                ask_user::refresh_ask_user_block_pub(state);
+                return;
+            }
+            InputEvent::ShowAskUserPopup(tool_call, questions) => {
+                ask_user::handle_show_ask_user_popup(state, tool_call, questions);
+                return;
+            }
+            _ => {}
+        }
+
+        // When focused, intercept navigation keys for block interaction
+        if state.ask_user_focused {
+            match event {
+                InputEvent::AskUserNextTab | InputEvent::CursorRight => {
+                    ask_user::handle_ask_user_next_tab(state);
+                    return;
+                }
+                InputEvent::AskUserPrevTab | InputEvent::CursorLeft => {
+                    ask_user::handle_ask_user_prev_tab(state);
+                    return;
+                }
+                InputEvent::AskUserNextOption | InputEvent::Down | InputEvent::ScrollDown => {
+                    ask_user::handle_ask_user_next_option(state);
+                    return;
+                }
+                InputEvent::AskUserPrevOption | InputEvent::Up | InputEvent::ScrollUp => {
+                    ask_user::handle_ask_user_prev_option(state);
+                    return;
+                }
+                InputEvent::AskUserSelectOption | InputEvent::InputSubmitted => {
+                    ask_user::handle_ask_user_select_option(state, output_tx);
+                    return;
+                }
+                InputEvent::AskUserSubmit => {
+                    ask_user::handle_ask_user_submit(state, output_tx);
+                    return;
+                }
+                InputEvent::AskUserCustomInputChanged(c) => {
+                    ask_user::handle_ask_user_custom_input_changed(state, c);
+                    return;
+                }
+                InputEvent::AskUserCustomInputBackspace => {
+                    ask_user::handle_ask_user_custom_input_backspace(state);
+                    return;
+                }
+                InputEvent::AskUserCustomInputDelete => {
+                    ask_user::handle_ask_user_custom_input_delete(state);
+                    return;
+                }
+                InputEvent::InputChanged(c) => {
+                    if let Some(num) = c.to_digit(10)
+                        && (1..=9).contains(&num)
+                    {
+                        ask_user::handle_ask_user_quick_select(state, num as usize, output_tx);
+                        return;
+                    }
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_changed(state, c);
+                    }
+                    return;
+                }
+                InputEvent::InputBackspace => {
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_backspace(state);
+                    }
+                    return;
+                }
+                InputEvent::InputDelete => {
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_delete(state);
+                    }
+                    return;
+                }
+                _ => {
+                    // Consume other events while focused
+                    return;
+                }
+            }
+        }
+        // When unfocused, all events pass through to normal handlers (scrolling works)
+    }
+
+    // Handle ShowAskUserPopup event even when popup is not visible
+    if let InputEvent::ShowAskUserPopup(tool_call, questions) = event {
+        ask_user::handle_show_ask_user_popup(state, tool_call, questions);
+        return;
     }
 
     // Intercept keys for Model Switcher Popup
@@ -744,6 +854,9 @@ pub fn update(
         InputEvent::MessageToolCalls(tool_calls) => {
             tool::handle_message_tool_calls(state, tool_calls);
         }
+        InputEvent::StreamToolCallProgress(infos) => {
+            tool::handle_stream_tool_call_progress(state, infos);
+        }
         InputEvent::RetryLastToolCall => {
             tool::handle_retry_tool_call(state, input_tx, cancel_tx);
         }
@@ -942,6 +1055,7 @@ pub fn update(
         InputEvent::AddUserMessage(s) => {
             message::handle_add_user_message(state, s);
         }
+
         InputEvent::HasUserMessage => {
             message::handle_has_user_message(state);
         }
@@ -1117,6 +1231,22 @@ pub fn update(
         InputEvent::PlanReviewResolve => {
             // Handled by plan review interceptor above
         }
+
+        // Ask User popup events (handled in intercept block above, but need match arms)
+        InputEvent::ShowAskUserPopup(_, _)
+        | InputEvent::AskUserNextTab
+        | InputEvent::AskUserPrevTab
+        | InputEvent::AskUserNextOption
+        | InputEvent::AskUserPrevOption
+        | InputEvent::AskUserSelectOption
+        | InputEvent::AskUserCustomInputChanged(_)
+        | InputEvent::AskUserCustomInputBackspace
+        | InputEvent::AskUserCustomInputDelete
+        | InputEvent::AskUserSubmit
+        | InputEvent::AskUserCancel => {
+            // These are handled in the intercept block above when popup is visible
+            // If we reach here, the popup is not visible, so ignore
+        }
     }
 
     flush_pending_user_messages_if_idle(state, input_tx, output_tx);
@@ -1148,6 +1278,7 @@ mod tests {
             editor_command: None,
             auth_display_info: (None, None, None),
             board_agent_id: None,
+            init_prompt_content: None,
         })
     }
 

@@ -1,4 +1,5 @@
 use crate::utils::agents_md::{AgentsMdInfo, format_agents_md_for_context};
+use crate::utils::apps_md::{AppsMdInfo, format_apps_md_for_context};
 use crate::utils::local_context::LocalContext;
 use stakpak_api::models::ListRuleBook;
 use stakpak_shared::models::integrations::openai::{
@@ -202,6 +203,12 @@ pub fn add_agents_md(user_input: &str, agents_md: &AgentsMdInfo) -> (String, Str
 /// - Use existing tools (create, str_replace, view) for plan management
 pub fn build_plan_mode_instructions() -> &'static str {
     include_str!("prompts/plan_mode_activated.txt")
+}
+
+pub fn add_apps_md(user_input: &str, apps_md: &AppsMdInfo) -> (String, String) {
+    let apps_text = format_apps_md_for_context(apps_md);
+    let formatted_input = format!("{}\n<apps_md>\n{}\n</apps_md>", user_input, apps_text);
+    (formatted_input, apps_text)
 }
 
 /// Refresh billing info and send it to the TUI.

@@ -4,7 +4,7 @@ use crate::commands::agent::run::checkpoint::{
     get_checkpoint_messages, resume_session_from_checkpoint,
 };
 use crate::commands::agent::run::helpers::{
-    add_agents_md, add_local_context, add_rulebooks, build_plan_mode_instructions,
+    add_agents_md, add_apps_md, add_local_context, add_rulebooks, build_plan_mode_instructions,
     build_resume_command, extract_last_checkpoint_id, refresh_billing_info,
     tool_call_history_string, tool_result, user_message,
 };
@@ -16,6 +16,7 @@ use crate::commands::agent::run::tui::{send_input_event, send_tool_call};
 use crate::commands::warden;
 use crate::config::AppConfig;
 use crate::utils::agents_md::AgentsMdInfo;
+use crate::utils::apps_md::AppsMdInfo;
 use crate::utils::check_update::get_latest_cli_version;
 use crate::utils::local_context::LocalContext;
 use reqwest::header::HeaderMap;
@@ -28,6 +29,10 @@ use stakpak_shared::models::integrations::openai::{
     ChatMessage, MessageContent, Role, ToolCall, ToolCallResultStatus,
 };
 use stakpak_shared::models::llm::{LLMTokenUsage, PromptTokensDetails};
+
+/// Bundled infrastructure analysis prompt (embedded at compile time)
+/// analyze the infrastructure and provide a summary of the current state
+const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v3.md");
 use stakpak_shared::telemetry::{TelemetryEvent, capture_event};
 use stakpak_tui::{InputEvent, LoadingOperation, OutputEvent};
 use std::sync::Arc;
@@ -126,6 +131,9 @@ pub struct RunInteractiveConfig {
     pub enabled_tools: EnabledToolsConfig,
     pub model: Model,
     pub agents_md: Option<AgentsMdInfo>,
+    pub apps_md: Option<AppsMdInfo>,
+    /// When true, send init_prompt_content as first user message on session start (stakpak init)
+    pub send_init_prompt_on_start: bool,
 }
 
 #[allow(unused_assignments)] // plan_mode_active: written in PlanModeActivated, read in later phases
@@ -162,6 +170,7 @@ pub async fn run_interactive(
         let system_prompt = config.system_prompt.clone();
         let enable_subagents = config.enable_subagents;
         let agents_md = config.agents_md.clone();
+        let apps_md = config.apps_md.clone();
         let checkpoint_id = config.checkpoint_id.clone();
         let session_id = config.session_id.clone();
         let allowed_tools = config.allowed_tools.clone();
@@ -193,6 +202,11 @@ pub async fn run_interactive(
 
         let auth_display_info_for_tui = ctx.get_auth_display_info();
         let model_for_tui = model.clone();
+
+        // Use  init prompt (loaded at module level as const)
+        let init_prompt_content_for_tui = Some(INIT_PROMPT.to_string());
+
+        let send_init_prompt_on_start = config.send_init_prompt_on_start;
         let tui_handle = tokio::spawn(async move {
             let latest_version = get_latest_cli_version().await;
             stakpak_tui::run_tui(
@@ -211,6 +225,8 @@ pub async fn run_interactive(
                 model_for_tui,
                 editor_command,
                 auth_display_info_for_tui,
+                init_prompt_content_for_tui,
+                send_init_prompt_on_start,
             )
             .await
             .map_err(|e| e.to_string())
@@ -244,6 +260,7 @@ pub async fn run_interactive(
         let ctx_clone = ctx.clone(); // Clone ctx for use in client task
         let client_handle: tokio::task::JoinHandle<ClientTaskResult> = tokio::spawn(async move {
             let mut current_session_id: Option<Uuid> = None;
+            let mut current_metadata: Option<serde_json::Value> = None;
 
             // Build unified AgentClient config
             let providers = ctx_clone.get_llm_provider_config();
@@ -278,6 +295,10 @@ pub async fn run_interactive(
                 enable_mtls,
                 enable_subagents,
                 allowed_tools: allowed_tools_for_tui.clone(),
+                subagent_config: stakpak_mcp_server::SubagentConfig {
+                    profile_name: Some(ctx_clone.profile_name.clone()),
+                    config_path: Some(ctx_clone.config_path.clone()),
+                },
             };
             // Tools are already filtered by initialize_mcp_server_and_tools (same as async mode)
             let (mcp_client, mcp_tools, tools, _server_shutdown_tx, _proxy_shutdown_tx) =
@@ -330,11 +351,12 @@ pub async fn run_interactive(
             }
 
             if let Some(session_id_str) = session_id {
-                let (chat_messages, tool_calls, session_id_uuid) =
+                let (chat_messages, tool_calls, session_id_uuid, checkpoint_metadata) =
                     resume_session_from_checkpoint(client.as_ref(), &session_id_str, &input_tx)
                         .await?;
 
                 current_session_id = Some(session_id_uuid);
+                current_metadata = checkpoint_metadata;
                 should_update_rulebooks_on_next_message = true;
                 tools_queue.extend(tool_calls.clone());
 
@@ -360,8 +382,9 @@ pub async fn run_interactive(
                     current_session_id = Some(checkpoint.session_id);
                 }
 
-                let checkpoint_messages =
+                let (checkpoint_messages, checkpoint_metadata) =
                     get_checkpoint_messages(client.as_ref(), &checkpoint_id_str).await?;
+                current_metadata = checkpoint_metadata;
 
                 let (chat_messages, tool_calls) = extract_checkpoint_messages_and_tool_calls(
                     &checkpoint_id_str,
@@ -459,6 +482,15 @@ pub async fn run_interactive(
                             user_input
                         };
 
+                        let user_input = if messages.is_empty()
+                            && let Some(apps_md_info) = &apps_md
+                        {
+                            let (user_input, _) = add_apps_md(&user_input, apps_md_info);
+                            user_input
+                        } else {
+                            user_input
+                        };
+
                         // Inject plan mode instructions on the first user message
                         // after plan mode is activated (via /plan or --plan)
                         let user_input = if plan_mode_active && !plan_instructions_injected {
@@ -531,6 +563,43 @@ pub async fn run_interactive(
                         }
                     }
                     OutputEvent::AcceptTool(tool_call) => {
+                        // Check if this is the ask_user tool - handle it specially
+                        let tool_name = tool_call
+                            .function
+                            .name
+                            .strip_prefix("stakpak__")
+                            .unwrap_or(&tool_call.function.name);
+                        if tool_name == "ask_user" {
+                            // Parse the questions from the tool call arguments
+                            match serde_json::from_str::<
+                                stakpak_shared::models::integrations::openai::AskUserRequest,
+                            >(&tool_call.function.arguments)
+                            {
+                                Ok(request) => {
+                                    // Send the popup event to TUI
+                                    send_input_event(
+                                        &input_tx,
+                                        InputEvent::ShowAskUserPopup(
+                                            tool_call.clone(),
+                                            request.questions,
+                                        ),
+                                    )
+                                    .await?;
+                                    // Don't continue - wait for AskUserResponse
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // Failed to parse arguments - return error result
+                                    messages.push(tool_result(
+                                        tool_call.id.clone(),
+                                        format!("Failed to parse ask_user arguments: {}", e),
+                                    ));
+                                }
+                            }
+                            // If we get here, there was an error - continue to next iteration
+                            continue;
+                        }
+
                         send_input_event(
                             &input_tx,
                             InputEvent::StartLoadingOperation(LoadingOperation::ToolExecution),
@@ -725,9 +794,15 @@ pub async fn run_interactive(
                             )
                             .await
                             {
-                                Ok((chat_messages, tool_calls, session_id_uuid)) => {
+                                Ok((
+                                    chat_messages,
+                                    tool_calls,
+                                    session_id_uuid,
+                                    checkpoint_metadata,
+                                )) => {
                                     // Track the current session ID
                                     current_session_id = Some(session_id_uuid);
+                                    current_metadata = checkpoint_metadata;
 
                                     // Mark that we need to update rulebooks on the next user message
                                     should_update_rulebooks_on_next_message = true;
@@ -794,9 +869,15 @@ pub async fn run_interactive(
                         )
                         .await
                         {
-                            Ok((chat_messages, tool_calls, session_id_uuid)) => {
+                            Ok((
+                                chat_messages,
+                                tool_calls,
+                                session_id_uuid,
+                                checkpoint_metadata,
+                            )) => {
                                 // Track the current session ID
                                 current_session_id = Some(session_id_uuid);
+                                current_metadata = checkpoint_metadata;
 
                                 // Mark that we need to update rulebooks on the next user message
                                 should_update_rulebooks_on_next_message = true;
@@ -1042,6 +1123,19 @@ pub async fn run_interactive(
                         send_input_event(&input_tx, InputEvent::AddUserMessage(approval_msg))
                             .await?;
                     }
+                    OutputEvent::AskUserResponse(tool_call_result) => {
+                        // User responded to ask_user popup - add the result to messages
+                        messages.push(tool_result(
+                            tool_call_result.call.id.clone(),
+                            tool_call_result.result.clone(),
+                        ));
+
+                        // Display the result in the TUI
+                        send_input_event(&input_tx, InputEvent::ToolResult(tool_call_result))
+                            .await?;
+
+                        // Continue to send to API
+                    }
                 }
 
                 // Skip sending to API if there are pending tool calls without tool_results
@@ -1069,6 +1163,7 @@ pub async fn run_interactive(
                             Some(tools.clone()),
                             headers.clone(),
                             current_session_id,
+                            current_metadata.clone(),
                         )
                         .await;
 
@@ -1181,6 +1276,16 @@ pub async fn run_interactive(
                             current_session_id = Some(session_id);
                         }
 
+                        // Update metadata from checkpoint state so the next
+                        // turn sees the latest trimming state.
+                        if let Some(state_metadata) = response
+                            .metadata
+                            .as_ref()
+                            .and_then(|meta| meta.get("state_metadata"))
+                        {
+                            current_metadata = Some(state_metadata.clone());
+                        }
+
                         // Accumulate usage from response
                         total_session_usage.prompt_tokens += response.usage.prompt_tokens;
                         total_session_usage.completion_tokens += response.usage.completion_tokens;
@@ -1257,8 +1362,34 @@ pub async fn run_interactive(
                             tools_queue.extend(tool_calls.clone());
 
                             // Send the first tool call to show in UI
+                            // But auto-approve ask_user tool
                             if !tools_queue.is_empty() {
                                 let tool_call = tools_queue.remove(0);
+                                let tool_name = tool_call
+                                    .function
+                                    .name
+                                    .strip_prefix("stakpak__")
+                                    .unwrap_or(&tool_call.function.name);
+
+                                if tool_name == "ask_user" {
+                                    // Auto-approve ask_user - parse and show popup directly
+                                    if let Ok(request) = serde_json::from_str::<
+                                        stakpak_shared::models::integrations::openai::AskUserRequest,
+                                    >(
+                                        &tool_call.function.arguments
+                                    ) {
+                                        send_input_event(
+                                            &input_tx,
+                                            InputEvent::ShowAskUserPopup(
+                                                tool_call.clone(),
+                                                request.questions,
+                                            ),
+                                        )
+                                        .await?;
+                                        continue;
+                                    }
+                                    // If parsing failed, fall through to normal flow
+                                }
                                 send_tool_call(&input_tx, &tool_call).await?;
                                 continue;
                             }
@@ -1339,12 +1470,6 @@ pub async fn run_interactive(
                 && std::env::var("STAKPAK_SKIP_WARDEN").is_err();
 
             if should_use_warden {
-                // Set the profile environment variable so warden knows which profile to use
-                // This is safe because we're setting it for the current process before re-execution
-                unsafe {
-                    std::env::set_var("STAKPAK_PROFILE", &ctx.profile_name);
-                }
-
                 // Re-execute stakpak inside warden container
                 if let Err(e) =
                     warden::run_stakpak_in_warden(ctx, &std::env::args().collect::<Vec<_>>()).await

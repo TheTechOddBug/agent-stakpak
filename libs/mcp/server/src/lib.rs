@@ -118,31 +118,24 @@ impl AuthConfig {
     }
 }
 
+/// Configuration inherited by subagents so they use the same profile and config as the parent.
+#[derive(Clone, Debug, Default)]
+pub struct SubagentConfig {
+    pub profile_name: Option<String>,
+    pub config_path: Option<String>,
+}
+
 pub struct MCPServerConfig {
     pub client: Option<Arc<dyn AgentProvider>>,
     pub bind_address: String,
-    pub redact_secrets: bool,
-    pub privacy_mode: bool,
     pub enabled_tools: EnabledToolsConfig,
     pub tool_mode: ToolMode,
     pub enable_subagents: bool,
     pub certificate_chain: Arc<Option<CertificateChain>>,
-}
-
-/// Initialize gitleaks configuration if secret redaction is enabled
-async fn init_gitleaks_if_needed(redact_secrets: bool, privacy_mode: bool) {
-    if redact_secrets {
-        tokio::spawn(async move {
-            match std::panic::catch_unwind(|| {
-                stakpak_shared::secrets::initialize_gitleaks_config(privacy_mode)
-            }) {
-                Ok(_rule_count) => {}
-                Err(_) => {
-                    // Failed to initialize, will initialize on first use
-                }
-            }
-        });
-    }
+    /// Pre-built rustls ServerConfig for TLS. When set, this is used directly
+    /// instead of building one from `certificate_chain`.
+    pub server_tls_config: Option<Arc<rustls::ServerConfig>>,
+    pub subagent_config: SubagentConfig,
 }
 
 /// Create graceful shutdown handler
@@ -234,11 +227,10 @@ fn build_tool_container(
 
             ToolContainer::new(
                 None,
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
+                config.subagent_config.clone(),
             )
         }
         ToolMode::RemoteOnly => {
@@ -253,11 +245,10 @@ fn build_tool_container(
 
             ToolContainer::new(
                 config.client.clone(),
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
+                config.subagent_config.clone(),
             )
         }
         ToolMode::Combined => {
@@ -274,11 +265,10 @@ fn build_tool_container(
 
             ToolContainer::new(
                 config.client.clone(),
-                config.redact_secrets,
-                config.privacy_mode,
                 config.enabled_tools.clone(),
                 task_manager_handle.clone(),
                 tool_router,
+                config.subagent_config.clone(),
             )
         }
     }
@@ -296,8 +286,6 @@ async fn start_server_internal(
     tcp_listener: TcpListener,
     shutdown_rx: Option<Receiver<()>>,
 ) -> Result<()> {
-    init_gitleaks_if_needed(config.redact_secrets, config.privacy_mode).await;
-
     // Create and start TaskManager
     let task_manager = TaskManager::new();
     let task_manager_handle = task_manager.handle();
@@ -317,10 +305,16 @@ async fn start_server_internal(
 
     let router = axum::Router::new().nest_service("/mcp", service);
 
-    if let Some(cert_chain) = config.certificate_chain.as_ref() {
-        let tls_config = cert_chain.create_server_config()?;
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config));
+    let tls_config = if let Some(pre_built) = config.server_tls_config {
+        Some(pre_built)
+    } else if let Some(cert_chain) = config.certificate_chain.as_ref() {
+        Some(Arc::new(cert_chain.create_server_config()?))
+    } else {
+        None
+    };
+
+    if let Some(tls_config) = tls_config {
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
 
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
@@ -364,8 +358,6 @@ pub async fn start_server_stdio(
     config: MCPServerConfig,
     shutdown_rx: Option<Receiver<()>>,
 ) -> Result<()> {
-    init_gitleaks_if_needed(config.redact_secrets, config.privacy_mode).await;
-
     // Create and start TaskManager
     let task_manager = TaskManager::new();
     let task_manager_handle = task_manager.handle();

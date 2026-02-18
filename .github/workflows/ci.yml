@@ -18,7 +18,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89.0"
+          toolchain: "1.91.0"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -34,3 +34,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --verbose
+
+      - name: Test (feature-gated)
+        run: |
+          cargo test -p stakpak --features libsql-test --verbose
+          cargo test -p stakpak-gateway --features libsql-test --verbose
+          cargo test -p stakai --features network-tests --verbose

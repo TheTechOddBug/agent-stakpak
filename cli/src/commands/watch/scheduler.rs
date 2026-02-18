@@ -1,6 +1,6 @@
-//! Cron scheduler integration for watch triggers.
+//! Cron scheduler integration for autopilot schedules.
 //!
-//! Uses tokio-cron-scheduler to schedule and execute triggers based on cron expressions.
+//! Uses tokio-cron-scheduler to schedule and execute schedules based on cron expressions.
 //! Users provide standard 5-part cron expressions (min hour day month weekday),
 //! which are converted internally to 6-part format (with seconds) for the scheduler.
 
@@ -9,7 +9,7 @@ use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-use super::config::Trigger;
+use super::config::Schedule;
 
 /// Convert a standard 5-part cron expression to 6-part by prepending "0 " for seconds.
 /// If already 6-part, returns as-is.
@@ -25,13 +25,13 @@ fn to_six_part_cron(expr: &str) -> String {
     }
 }
 
-/// Message sent when a trigger fires.
+/// Message sent when a schedule fires.
 #[derive(Debug, Clone)]
-pub struct TriggerEvent {
-    /// Name of the trigger that fired.
-    pub trigger_name: String,
-    /// The trigger configuration.
-    pub trigger: Trigger,
+pub struct SchedulerEvent {
+    /// Name of the schedule that fired.
+    pub schedule_name: String,
+    /// The schedule configuration.
+    pub schedule: Schedule,
 }
 
 /// Scheduler errors.
@@ -49,6 +49,9 @@ pub enum SchedulerError {
     #[error("Failed to shutdown scheduler: {0}")]
     ShutdownError(String),
 
+    #[error("Failed to remove job: {0}")]
+    RemoveJobError(String),
+
     #[error("Invalid cron expression '{expression}': {message}")]
     InvalidCron { expression: String, message: String },
 }
@@ -59,25 +62,25 @@ impl From<JobSchedulerError> for SchedulerError {
     }
 }
 
-/// Watch scheduler that manages trigger jobs.
-pub struct WatchScheduler {
+/// Watch scheduler that manages schedule jobs.
+pub struct Scheduler {
     scheduler: JobScheduler,
-    /// Channel to send trigger events when jobs fire.
-    event_tx: mpsc::Sender<TriggerEvent>,
+    /// Channel to send schedule events when jobs fire.
+    event_tx: mpsc::Sender<SchedulerEvent>,
     /// Registered job IDs for cleanup.
     job_ids: Vec<Uuid>,
 }
 
-impl WatchScheduler {
+impl Scheduler {
     /// Create a new scheduler with an event channel.
     ///
-    /// Returns the scheduler and a receiver for trigger events.
-    pub async fn new() -> Result<(Self, mpsc::Receiver<TriggerEvent>), SchedulerError> {
+    /// Returns the scheduler and a receiver for schedule events.
+    pub async fn new() -> Result<(Self, mpsc::Receiver<SchedulerEvent>), SchedulerError> {
         let scheduler = JobScheduler::new()
             .await
             .map_err(|e| SchedulerError::CreateError(e.to_string()))?;
 
-        // Channel for trigger events - buffer up to 100 events
+        // Channel for schedule events - buffer up to 100 events
         let (event_tx, event_rx) = mpsc::channel(100);
 
         Ok((
@@ -90,45 +93,45 @@ impl WatchScheduler {
         ))
     }
 
-    /// Register a trigger with the scheduler.
-    pub async fn register_trigger(&mut self, trigger: Trigger) -> Result<Uuid, SchedulerError> {
-        let trigger_name = trigger.name.clone();
-        let schedule = trigger.schedule.clone();
-        let schedule_6part = to_six_part_cron(&schedule);
+    /// Register a schedule with the scheduler.
+    pub async fn register_schedule(&mut self, schedule: Schedule) -> Result<Uuid, SchedulerError> {
+        let schedule_name = schedule.name.clone();
+        let cron_expr = schedule.cron.clone();
+        let schedule_6part = to_six_part_cron(&cron_expr);
         let event_tx = self.event_tx.clone();
-        let trigger_clone = trigger.clone();
+        let schedule_clone = schedule.clone();
 
         info!(
-            trigger = %trigger_name,
-            schedule = %schedule,
-            "Registering trigger with scheduler"
+            schedule = %schedule_name,
+            cron = %cron_expr,
+            "Registering schedule with scheduler"
         );
 
         // Create the job with the 6-part cron schedule
         let job = Job::new_async(schedule_6part.as_str(), move |_uuid, _lock| {
-            let trigger_name = trigger_name.clone();
-            let trigger = trigger_clone.clone();
+            let schedule_name = schedule_name.clone();
+            let schedule = schedule_clone.clone();
             let tx = event_tx.clone();
 
             Box::pin(async move {
-                debug!(trigger = %trigger_name, "Trigger fired");
+                debug!(schedule = %schedule_name, "Schedule fired");
 
-                let event = TriggerEvent {
-                    trigger_name: trigger_name.clone(),
-                    trigger,
+                let event = SchedulerEvent {
+                    schedule_name: schedule_name.clone(),
+                    schedule,
                 };
 
                 if let Err(e) = tx.send(event).await {
                     error!(
-                        trigger = %trigger_name,
+                        schedule = %schedule_name,
                         error = %e,
-                        "Failed to send trigger event"
+                        "Failed to send schedule event"
                     );
                 }
             })
         })
         .map_err(|e| SchedulerError::InvalidCron {
-            expression: schedule,
+            expression: cron_expr,
             message: e.to_string(),
         })?;
 
@@ -144,15 +147,15 @@ impl WatchScheduler {
         Ok(job_id)
     }
 
-    /// Register multiple triggers.
-    pub async fn register_triggers(
+    /// Register multiple schedules.
+    pub async fn register_schedules(
         &mut self,
-        triggers: Vec<Trigger>,
+        schedules: Vec<Schedule>,
     ) -> Result<Vec<Uuid>, SchedulerError> {
         let mut job_ids = Vec::new();
 
-        for trigger in triggers {
-            let job_id = self.register_trigger(trigger).await?;
+        for schedule in schedules {
+            let job_id = self.register_schedule(schedule).await?;
             job_ids.push(job_id);
         }
 
@@ -161,7 +164,7 @@ impl WatchScheduler {
 
     /// Start the scheduler.
     pub async fn start(&self) -> Result<(), SchedulerError> {
-        info!("Starting watch scheduler");
+        info!("Starting autopilot scheduler");
 
         self.scheduler
             .start()
@@ -173,13 +176,31 @@ impl WatchScheduler {
 
     /// Shutdown the scheduler gracefully.
     pub async fn shutdown(&mut self) -> Result<(), SchedulerError> {
-        info!("Shutting down watch scheduler");
+        info!("Shutting down autopilot scheduler");
 
         self.scheduler
             .shutdown()
             .await
             .map_err(|e| SchedulerError::ShutdownError(e.to_string()))?;
 
+        Ok(())
+    }
+
+    /// Remove a job by UUID.
+    pub async fn remove_job(&mut self, job_id: Uuid) -> Result<(), SchedulerError> {
+        if !self.job_ids.contains(&job_id) {
+            return Err(SchedulerError::RemoveJobError(format!(
+                "Job '{}' is not registered",
+                job_id
+            )));
+        }
+
+        self.scheduler
+            .remove(&job_id)
+            .await
+            .map_err(|e| SchedulerError::RemoveJobError(e.to_string()))?;
+
+        self.job_ids.retain(|id| *id != job_id);
         Ok(())
     }
 
@@ -211,12 +232,13 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    fn create_test_trigger(name: &str, schedule: &str) -> Trigger {
-        Trigger {
+    fn create_test_schedule(name: &str, cron: &str) -> Schedule {
+        Schedule {
             name: name.to_string(),
-            schedule: schedule.to_string(),
+            cron: cron.to_string(),
             check: None,
             check_timeout: None,
+            trigger_on: None,
             prompt: "Test prompt".to_string(),
             profile: None,
             board_id: None,
@@ -224,12 +246,17 @@ mod tests {
             enable_slack_tools: None,
             enable_subagents: None,
             pause_on_approval: None,
+            sandbox: None,
+            notify_on: None,
+            notify_channel: None,
+            notify_chat_id: None,
+            enabled: true,
         }
     }
 
     #[tokio::test]
     async fn test_scheduler_creation() {
-        let result = WatchScheduler::new().await;
+        let result = Scheduler::new().await;
         assert!(result.is_ok());
 
         let (scheduler, _rx) = result.unwrap();
@@ -237,33 +264,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_trigger() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+    async fn test_register_schedule() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Standard 5-part cron expression (converted internally to 6-part)
-        let trigger = create_test_trigger("test-trigger", "0 * * * *");
-        let result = scheduler.register_trigger(trigger).await;
+        let schedule = create_test_schedule("test-schedule", "0 * * * *");
+        let result = scheduler.register_schedule(schedule).await;
 
         assert!(result.is_ok());
         assert_eq!(scheduler.job_count(), 1);
     }
 
     #[tokio::test]
-    async fn test_register_multiple_triggers() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+    async fn test_register_multiple_schedules() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Standard 5-part cron expressions
-        let triggers = vec![
-            create_test_trigger("trigger-1", "0 * * * *"), // Every hour
-            create_test_trigger("trigger-2", "*/5 * * * *"), // Every 5 minutes
-            create_test_trigger("trigger-3", "0 0 * * *"), // Daily at midnight
+        let schedules = vec![
+            create_test_schedule("schedule-1", "0 * * * *"), // Every hour
+            create_test_schedule("schedule-2", "*/5 * * * *"), // Every 5 minutes
+            create_test_schedule("schedule-3", "0 0 * * *"), // Daily at midnight
         ];
 
-        let result = scheduler.register_triggers(triggers).await;
+        let result = scheduler.register_schedules(schedules).await;
 
         assert!(result.is_ok());
         assert_eq!(scheduler.job_count(), 3);
@@ -271,12 +294,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_cron_expression() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
-        let trigger = create_test_trigger("bad-trigger", "invalid cron");
-        let result = scheduler.register_trigger(trigger).await;
+        let schedule = create_test_schedule("bad-schedule", "invalid cron");
+        let result = scheduler.register_schedule(schedule).await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -287,16 +308,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_start_and_shutdown() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Standard 5-part cron expression
-        let trigger = create_test_trigger("test-trigger", "0 * * * *");
+        let schedule = create_test_schedule("test-schedule", "0 * * * *");
         scheduler
-            .register_trigger(trigger)
+            .register_schedule(schedule)
             .await
-            .expect("Failed to register trigger");
+            .expect("Failed to register schedule");
 
         // Start the scheduler
         let start_result = scheduler.start().await;
@@ -311,18 +330,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_job_execution() {
-        let (mut scheduler, mut rx) = WatchScheduler::new()
+    async fn test_remove_job() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
+        let schedule = create_test_schedule("remove-me", "0 * * * *");
+        let job_id = scheduler
+            .register_schedule(schedule)
             .await
-            .expect("Failed to create scheduler");
+            .expect("Failed to register schedule");
+
+        assert_eq!(scheduler.job_count(), 1);
+
+        scheduler
+            .remove_job(job_id)
+            .await
+            .expect("Failed to remove job");
+
+        assert_eq!(scheduler.job_count(), 0);
+        assert!(scheduler.job_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_job() {
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
+        let result = scheduler.remove_job(Uuid::new_v4()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_job_execution() {
+        let (mut scheduler, mut rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Use a very frequent schedule - must use 6-part here since 5-part can't express "every second"
         // This is the only case where 6-part is needed (sub-minute scheduling)
-        let trigger = create_test_trigger("fast-trigger", "* * * * * *");
+        let schedule = create_test_schedule("fast-schedule", "* * * * * *");
         scheduler
-            .register_trigger(trigger)
+            .register_schedule(schedule)
             .await
-            .expect("Failed to register trigger");
+            .expect("Failed to register schedule");
 
         // Start the scheduler
         scheduler.start().await.expect("Failed to start scheduler");
@@ -334,19 +378,17 @@ mod tests {
         scheduler.shutdown().await.expect("Failed to shutdown");
 
         // Verify we received an event
-        assert!(event_result.is_ok(), "Timed out waiting for trigger event");
+        assert!(event_result.is_ok(), "Timed out waiting for schedule event");
         let event = event_result.unwrap();
         assert!(event.is_some(), "Channel closed without receiving event");
 
         let event = event.unwrap();
-        assert_eq!(event.trigger_name, "fast-trigger");
+        assert_eq!(event.schedule_name, "fast-schedule");
     }
 
     #[tokio::test]
     async fn test_various_cron_expressions() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Standard 5-part cron expressions (converted internally)
         let expressions = [
@@ -359,13 +401,13 @@ mod tests {
             ("weekdays-9am", "0 9 * * 1-5"),    // Weekdays at 9 AM
         ];
 
-        for (name, schedule) in expressions {
-            let trigger = create_test_trigger(name, schedule);
-            let result = scheduler.register_trigger(trigger).await;
+        for (name, cron) in expressions {
+            let schedule = create_test_schedule(name, cron);
+            let result = scheduler.register_schedule(schedule).await;
             assert!(
                 result.is_ok(),
-                "Failed to register trigger with schedule '{}': {:?}",
-                schedule,
+                "Failed to register schedule with cron '{}': {:?}",
+                cron,
                 result.err()
             );
         }
@@ -375,16 +417,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_tick_for_job() {
-        let (mut scheduler, _rx) = WatchScheduler::new()
-            .await
-            .expect("Failed to create scheduler");
+        let (mut scheduler, _rx) = Scheduler::new().await.expect("Failed to create scheduler");
 
         // Standard 5-part cron expression
-        let trigger = create_test_trigger("test-trigger", "0 * * * *");
+        let schedule = create_test_schedule("test-schedule", "0 * * * *");
         let job_id = scheduler
-            .register_trigger(trigger)
+            .register_schedule(schedule)
             .await
-            .expect("Failed to register trigger");
+            .expect("Failed to register schedule");
 
         scheduler.start().await.expect("Failed to start scheduler");
 

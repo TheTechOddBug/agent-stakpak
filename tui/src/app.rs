@@ -119,6 +119,8 @@ pub struct AppState {
     pub completed_tool_calls: std::collections::HashSet<Uuid>,
     pub is_streaming: bool,
     pub latest_tool_call: Option<ToolCall>,
+    /// Stable message ID for the tool call streaming preview block
+    pub tool_call_stream_preview_id: Option<Uuid>,
     pub retry_attempts: usize,
     pub max_retry_attempts: usize,
     pub last_user_message_for_retry: Option<String>,
@@ -201,6 +203,8 @@ pub struct AppState {
     pub model: Model,
     /// Auth display info: (config_provider, auth_provider, subscription_name) for local providers
     pub auth_display_info: (Option<String>, Option<String>, Option<String>),
+    /// Content of init prompt for /init
+    pub init_prompt_content: Option<String>,
 
     // ========== Misc State ==========
     pub ctrl_c_pressed_once: bool,
@@ -290,6 +294,27 @@ pub struct AppState {
     pub plan_review_modal_kind: Option<crate::services::plan_review::CommentModalKind>,
     /// Confirmation dialog currently shown (approve, feedback, delete)
     pub plan_review_confirm: Option<crate::services::plan_review::ConfirmAction>,
+
+    // ========== Ask User Inline Block State ==========
+    /// Whether the ask user interaction is active
+    pub show_ask_user_popup: bool,
+    /// Questions to display in the inline block
+    pub ask_user_questions: Vec<stakpak_shared::models::integrations::openai::AskUserQuestion>,
+    /// User's answers (question label -> answer)
+    pub ask_user_answers:
+        HashMap<String, stakpak_shared::models::integrations::openai::AskUserAnswer>,
+    /// Currently selected tab index (question index, or questions.len() for Submit)
+    pub ask_user_current_tab: usize,
+    /// Currently selected option index within the current question
+    pub ask_user_selected_option: usize,
+    /// Custom input text when "Type something..." is selected
+    pub ask_user_custom_input: String,
+    /// The tool call that triggered this (for sending result back)
+    pub ask_user_tool_call: Option<ToolCall>,
+    /// Message ID for the inline ask_user block in the messages list
+    pub ask_user_message_id: Option<Uuid>,
+    /// Whether the ask_user block has keyboard focus (Tab toggles)
+    pub ask_user_focused: bool,
 }
 
 pub struct AppStateOptions<'a> {
@@ -306,6 +331,8 @@ pub struct AppStateOptions<'a> {
     pub auth_display_info: (Option<String>, Option<String>, Option<String>),
     /// Agent board ID for task tracking (from AGENT_BOARD_AGENT_ID env var)
     pub board_agent_id: Option<String>,
+    /// Content of init prompt
+    pub init_prompt_content: Option<String>,
 }
 
 impl AppState {
@@ -348,6 +375,7 @@ impl AppState {
             editor_command,
             auth_display_info,
             board_agent_id,
+            init_prompt_content,
         } = options;
 
         let helpers = Self::get_helper_commands();
@@ -426,6 +454,7 @@ impl AppState {
             allowed_tools: allowed_tools.cloned(),
             dialog_focused: false, // Default to messages view focused
             latest_tool_call: None,
+            tool_call_stream_preview_id: None,
             retry_attempts: 0,
             max_retry_attempts: 3,
             last_user_message_for_retry: None,
@@ -567,6 +596,18 @@ impl AppState {
             plan_review_modal_kind: None,
             plan_review_confirm: None,
             subagent_pause_info: HashMap::new(),
+            init_prompt_content,
+
+            // Ask User inline block initialization
+            show_ask_user_popup: false,
+            ask_user_questions: Vec::new(),
+            ask_user_answers: HashMap::new(),
+            ask_user_current_tab: 0,
+            ask_user_selected_option: 0,
+            ask_user_custom_input: String::new(),
+            ask_user_tool_call: None,
+            ask_user_message_id: None,
+            ask_user_focused: true,
         }
     }
 

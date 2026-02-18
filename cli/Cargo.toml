@@ -8,6 +8,12 @@ repository = { workspace = true }
 homepage = { workspace = true }
 readme = "../README.md"
 
+[features]
+default = ["bedrock"]
+bedrock = ["stakpak-shared/bedrock", "stakai/bedrock"]
+jemalloc = ["dep:tikv-jemallocator"]
+libsql-test = []
+
 [dependencies]
 stakpak-api = { workspace = true }
 stakpak-mcp-server = { workspace = true }
@@ -15,8 +21,11 @@ stakpak-mcp-client = { workspace = true }
 stakpak-mcp-proxy = { workspace = true }
 stakpak-tui = { workspace = true }
 stakpak-shared = { workspace = true }
+stakpak-server = { workspace = true }
+stakpak-gateway = { workspace = true }
 stakai = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 clap = { version = "4.5.23", features = ["derive", "env"] }
@@ -26,6 +35,7 @@ serde_json = { workspace = true }
 serde_yaml = "0.9"
 toml = "0.8.19"
 tokio = { workspace = true }
+axum = { workspace = true }
 uuid = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
@@ -56,14 +66,22 @@ croner = "3.0"
 humantime-serde = "1.1"
 humantime = "2.1"
 thiserror = "2.0"
-libsql = "0.9.29"
+libsql = { workspace = true }
 tokio-cron-scheduler = "0.15"
 which = "7.0"
+
+# jemalloc replaces musl's default allocator which aggressively munmap's pages,
+# causing use-after-free SIGSEGV in libsql's sqlite3Close() on Linux musl targets.
+# `unprefixed_malloc_on_supported_platforms` makes jemalloc provide the actual
+# malloc/free symbols, overriding musl's allocator for ALL code in the process
+# (including SQLite's embedded C code compiled via libsql-ffi). Without this,
+# only Rust allocations go through jemalloc while SQLite's sqlite3Malloc still
+# calls musl's aggressive allocator.
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 test-case = "3"
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true

@@ -1,23 +1,24 @@
 use crate::agent::run::helpers::system_message;
 use crate::commands::agent::run::helpers::{
-    add_agents_md, add_local_context, add_rulebooks, build_plan_mode_instructions,
+    add_agents_md, add_apps_md, add_local_context, add_rulebooks, build_plan_mode_instructions,
     build_resume_command, tool_result, user_message,
 };
 use crate::commands::agent::run::mcp_init::{McpInitConfig, initialize_mcp_server_and_tools};
 use crate::commands::agent::run::pause::{
-    AsyncManifest, AsyncOutcome, PauseReason, PendingToolCall, ResumeInput, build_resume_hint,
-    detect_pending_tool_calls, write_pause_manifest,
+    AsyncOutcome, ResumeInput, build_resume_hint, detect_pending_tool_calls, write_pause_manifest,
 };
 use crate::commands::agent::run::renderer::{OutputFormat, OutputRenderer};
 use crate::commands::agent::run::tooling::run_tool_call;
 use crate::config::AppConfig;
 use crate::utils::agents_md::AgentsMdInfo;
+use crate::utils::apps_md::AppsMdInfo;
 use crate::utils::local_context::LocalContext;
 use stakpak_api::{
     AgentClient, AgentClientConfig, AgentProvider, Model, SessionStorage, models::ListRuleBook,
 };
 use stakpak_mcp_server::EnabledToolsConfig;
 use stakpak_shared::local_store::LocalStore;
+use stakpak_shared::models::async_manifest::{AsyncManifest, PauseReason, PendingToolCall};
 use stakpak_shared::models::integrations::openai::{ChatMessage, MessageContent, Role};
 use stakpak_shared::models::llm::LLMTokenUsage;
 use std::collections::HashMap;
@@ -42,6 +43,7 @@ pub struct RunAsyncConfig {
     pub enabled_tools: EnabledToolsConfig,
     pub model: Model,
     pub agents_md: Option<AgentsMdInfo>,
+    pub apps_md: Option<AppsMdInfo>,
     #[allow(dead_code)] // consumed in Phase 11: Async Mode Plan Support
     pub plan_mode: bool,
     /// Auto-approve the plan when status becomes 'reviewing'
@@ -208,6 +210,10 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
         enable_mtls: config.enable_mtls,
         enable_subagents: config.enable_subagents,
         allowed_tools: config.allowed_tools.clone(),
+        subagent_config: stakpak_mcp_server::SubagentConfig {
+            profile_name: Some(ctx.profile_name.clone()),
+            config_path: Some(ctx.config_path.clone()),
+        },
     };
     let mcp_init_result = initialize_mcp_server_and_tools(&ctx, mcp_init_config, None).await?;
     let mcp_client = mcp_init_result.client;
@@ -243,6 +249,7 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
 
     let mut current_session_id: Option<Uuid> = None;
     let mut current_checkpoint_id: Option<Uuid> = None;
+    let mut current_metadata: Option<serde_json::Value> = None;
     let mut prior_steps: usize = 0;
 
     // Load checkpoint/session messages if provided
@@ -258,6 +265,7 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
 
         current_session_id = Some(checkpoint.session_id);
         current_checkpoint_id = Some(checkpoint.id);
+        current_metadata = checkpoint.state.metadata;
         chat_messages.extend(checkpoint.state.messages);
 
         llm_response_time += checkpoint_start.elapsed();
@@ -277,6 +285,7 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
             Ok(checkpoint) => {
                 current_session_id = Some(checkpoint.session_id);
                 current_checkpoint_id = Some(checkpoint_uuid);
+                current_metadata = checkpoint.state.metadata;
                 prior_steps = checkpoint
                     .state
                     .messages
@@ -430,6 +439,15 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
             user_input
         };
 
+        let user_input = if chat_messages.is_empty()
+            && let Some(apps_md) = &config.apps_md
+        {
+            let (user_input, _apps_md_text) = add_apps_md(&user_input, apps_md);
+            user_input
+        } else {
+            user_input
+        };
+
         chat_messages.push(user_message(user_input));
     }
 
@@ -509,6 +527,7 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
                 chat_messages.clone(),
                 Some(tools.clone()),
                 current_session_id,
+                current_metadata.clone(),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -538,6 +557,16 @@ pub async fn run_async(ctx: AppConfig, config: RunAsyncConfig) -> Result<AsyncOu
         }
 
         chat_messages.push(response.choices[0].message.clone());
+
+        // Update metadata from checkpoint state so the next
+        // turn sees the latest trimming state.
+        if let Some(state_metadata) = response
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("state_metadata"))
+        {
+            current_metadata = Some(state_metadata.clone());
+        }
 
         // Get session_id and checkpoint_id from the response
         // response.id is the checkpoint_id created by chat_completion

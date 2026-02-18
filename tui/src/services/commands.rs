@@ -282,6 +282,10 @@ pub fn commands_to_helper_commands() -> Vec<HelperCommand> {
             command: "/plan",
             description: "Enter plan mode: /plan [optional prompt]",
         },
+        HelperCommand {
+            command: "/init",
+            description: "Analyze your infrastructure setup",
+        },
     ]
 }
 
@@ -517,6 +521,35 @@ pub fn execute_command(command_id: CommandId, ctx: CommandContext) -> Result<(),
                     .output_tx
                     .try_send(OutputEvent::PlanModeActivated(inline_prompt));
             }
+            Ok(())
+        }
+
+        "/init" => {
+            //  init prompt is always available (embedded at compile time)
+            let prompt = match ctx.state.init_prompt_content.as_deref() {
+                Some(p) if !p.trim().is_empty() => p.to_string(),
+                _ => {
+                    push_error_message(
+                        ctx.state,
+                        "Internal error: init prompt not available",
+                        None,
+                    );
+                    ctx.state.text_area.set_text("");
+                    ctx.state.show_helper_dropdown = false;
+                    return Ok(());
+                }
+            };
+
+            ctx.state.messages.push(Message::user(prompt.clone(), None));
+            let _ = ctx.output_tx.try_send(OutputEvent::UserMessage(
+                prompt,
+                ctx.state.shell_tool_calls.clone(),
+                Vec::new(), // No image parts for command
+            ));
+            ctx.state.shell_tool_calls = None;
+            ctx.state.text_area.set_text("");
+            ctx.state.show_helper_dropdown = false;
+            crate::services::message::invalidate_message_lines_cache(ctx.state);
             Ok(())
         }
 

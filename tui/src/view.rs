@@ -83,11 +83,12 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
     // Calculate shell popup height (goes above input)
     let shell_popup_height = shell_popup::calculate_popup_height(state, main_area.height);
 
-    // Calculate approval bar height
-    let approval_bar_height = state.approval_bar.calculate_height();
+    // Calculate approval bar height (needs terminal width for wrapping calculation)
+    let approval_bar_height = state.approval_bar.calculate_height(main_area.width);
     let approval_bar_visible = state.approval_bar.is_visible();
 
     // Hide input when shell popup is expanded (takes over input) or when approval bar is visible
+    let ask_user_visible = state.show_ask_user_popup && !state.ask_user_questions.is_empty();
     let input_visible =
         !(approval_bar_visible || state.shell_popup_visible && state.shell_popup_expanded);
     let effective_input_height = if input_visible { input_height } else { 0 };
@@ -99,8 +100,8 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
         0
     };
 
-    // Hide dropdown when approval bar is visible
-    let effective_dropdown_height = if approval_bar_visible {
+    // Hide dropdown when approval bar is visible or ask_user popup is visible
+    let effective_dropdown_height = if approval_bar_visible || ask_user_visible {
         0
     } else {
         dropdown_height
@@ -208,7 +209,11 @@ pub fn view(f: &mut Frame, state: &mut AppState) {
         render_file_search_dropdown(f, state, dropdown_area);
     }
     // Render hint/shortcuts if not hiding for dropdown, not showing collapsed messages, and not showing approval bar
-    if !state.show_helper_dropdown && !state.show_collapsed_messages && !approval_bar_visible {
+    if !state.show_helper_dropdown
+        && !state.show_collapsed_messages
+        && !approval_bar_visible
+        && !ask_user_visible
+    {
         let padded_hint_area = Rect {
             x: hint_area.x + 1,
             y: hint_area.y,
