@@ -2,7 +2,6 @@ use crate::config::AppConfig;
 use crate::utils::plugins::{PluginConfig, get_plugin_path};
 use clap::Subcommand;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -159,10 +158,15 @@ pub async fn get_warden_plugin_path() -> String {
     get_plugin_path(warden_config).await
 }
 
-/// Helper function to prepare volumes for warden container
-/// Collects volumes from config and always appends stakpak config if it exists and isn't already mounted
-/// If check_enabled is true, only adds volumes when warden is enabled in config
+/// Helper function to prepare volumes for warden container.
+///
+/// Collects volumes from the profile config, then ensures every entry from
+/// [`stakpak_agent_default_mounts`] is present (deduped by container-side path).
+/// If `check_enabled` is true, profile volumes are only included when
+/// `warden.enabled` is true.
 pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
+    use crate::config::warden::stakpak_agent_default_mounts;
+
     let mut volumes_to_mount = Vec::new();
 
     // Add volumes from profile config
@@ -172,53 +176,18 @@ pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
         volumes_to_mount.extend(warden_config.volumes.clone());
     }
 
-    // Always mount the aqua tool cache as a named volume so downloaded CLI tools
-    // persist across container runs (see Dockerfile CACHING section).
-    let aqua_cache_volume = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua".to_string();
-    let aqua_already_mounted = volumes_to_mount.iter().any(|v| v.contains("aquaproj-aqua"));
-    if !aqua_already_mounted {
-        volumes_to_mount.push(aqua_cache_volume);
-    }
-
-    // Always append stakpak config and auth files if they exist and not already in the list
-    if let Ok(home_dir) = std::env::var("HOME") {
-        let stakpak_dir = Path::new(&home_dir).join(".stakpak");
-
-        // Mount config.toml if it exists
-        let config_path = stakpak_dir.join("config.toml");
-        if config_path.exists() {
-            let config_path_str = config_path.to_string_lossy();
-            let stakpak_config_mount =
-                format!("{}:/home/agent/.stakpak/config.toml:ro", config_path_str);
-
-            // Check if stakpak config is already in the volume list
-            let config_already_mounted = volumes_to_mount.iter().any(|v| {
-                v.contains("/.stakpak/config.toml")
-                    || v.ends_with(":/home/agent/.stakpak/config.toml:ro")
-                    || v.ends_with(":/home/agent/.stakpak/config.toml")
-            });
-
-            if !config_already_mounted {
-                volumes_to_mount.push(stakpak_config_mount);
-            }
-        }
-
-        // Mount auth.toml if it exists (contains provider credentials)
-        let auth_path = stakpak_dir.join("auth.toml");
-        if auth_path.exists() {
-            let auth_path_str = auth_path.to_string_lossy();
-            let stakpak_auth_mount = format!("{}:/home/agent/.stakpak/auth.toml:ro", auth_path_str);
-
-            // Check if auth.toml is already in the volume list
-            let auth_already_mounted = volumes_to_mount.iter().any(|v| {
-                v.contains("/.stakpak/auth.toml")
-                    || v.ends_with(":/home/agent/.stakpak/auth.toml:ro")
-                    || v.ends_with(":/home/agent/.stakpak/auth.toml")
-            });
-
-            if !auth_already_mounted {
-                volumes_to_mount.push(stakpak_auth_mount);
-            }
+    // Append every default mount that isn't already covered by the profile.
+    // Dedup by the container-side path (the part after the first `:`).
+    for default_vol in stakpak_agent_default_mounts() {
+        let container_path = default_vol
+            .split(':')
+            .nth(1)
+            .unwrap_or(&default_vol);
+        let already_mounted = volumes_to_mount
+            .iter()
+            .any(|v| v.contains(container_path));
+        if !already_mounted {
+            volumes_to_mount.push(default_vol);
         }
     }
 
