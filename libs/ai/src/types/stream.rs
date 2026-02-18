@@ -106,6 +106,7 @@ impl Stream for GenerateStream {
                     id,
                     name,
                     arguments,
+                    ..
                 } => {
                     // Update the tool call with final name and arguments
                     if let Some(tc) = this
@@ -131,6 +132,17 @@ impl Stream for GenerateStream {
 
                         span.record("gen_ai.usage.input_tokens", usage.prompt_tokens as i64);
                         span.record("gen_ai.usage.output_tokens", usage.completion_tokens as i64);
+
+                        // Non-standard: Cache token metrics (not part of OTel GenAI semantic conventions)
+                        if let Some(cache_read) = usage.cache_read_tokens() {
+                            span.record("gen_ai.usage.cache_read_input_tokens", cache_read as i64);
+                        }
+                        if let Some(cache_write) = usage.cache_write_tokens() {
+                            span.record(
+                                "gen_ai.usage.cache_write_input_tokens",
+                                cache_write as i64,
+                            );
+                        }
 
                         // finish_reasons is an array per OTel spec
                         let finish_reason = format!("{:?}", reason.unified);
@@ -217,6 +229,9 @@ pub enum StreamEvent {
         name: String,
         /// Complete arguments as JSON
         arguments: Value,
+        /// Opaque provider-specific metadata (e.g., Gemini thought_signature)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
     },
 
     /// Generation finished
@@ -278,6 +293,22 @@ impl StreamEvent {
             id: id.into(),
             name: name.into(),
             arguments,
+            metadata: None,
+        }
+    }
+
+    /// Create a tool call end event with metadata
+    pub fn tool_call_end_with_metadata(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: Value,
+        metadata: Option<Value>,
+    ) -> Self {
+        Self::ToolCallEnd {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            metadata,
         }
     }
 

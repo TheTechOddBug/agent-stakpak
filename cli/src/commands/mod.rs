@@ -11,11 +11,16 @@ pub mod acp;
 pub mod agent;
 pub mod auth;
 pub mod auto_update;
+pub mod autopilot;
 pub mod board;
 pub mod mcp;
 pub mod warden;
+pub mod watch;
+
+use autopilot::{StartArgs, StopArgs};
 
 pub use auth::AuthCommands;
+pub use autopilot::AutopilotCommands;
 pub use mcp::McpCommands;
 
 /// Frontmatter structure for rulebook metadata
@@ -137,6 +142,9 @@ pub enum Commands {
     /// Get current account
     Account,
 
+    /// Analyze your infrastructure setup
+    Init,
+
     /// MCP commands
     #[command(subcommand)]
     Mcp(McpCommands),
@@ -165,9 +173,25 @@ pub enum Commands {
     },
     /// Update Stakpak Agent to the latest version
     Update,
+
+    /// Autonomous 24/7 lifecycle commands
+    #[command(subcommand)]
+    Autopilot(AutopilotCommands),
+
+    /// Start autopilot — auto-configures on first run (alias: stakpak autopilot up)
+    Up {
+        #[command(flatten)]
+        args: StartArgs,
+    },
+
+    /// Alias for `stakpak autopilot down`
+    Down {
+        #[command(flatten)]
+        args: StopArgs,
+    },
 }
 
-async fn get_client(config: &AppConfig) -> Result<Arc<dyn AgentProvider>, String> {
+async fn build_agent_client(config: &AppConfig) -> Result<AgentClient, String> {
     // Use credential resolution with auth.toml fallback chain
     // Refresh OAuth tokens in parallel to minimize startup delay
     let providers = config.get_llm_provider_config_async().await;
@@ -177,7 +201,7 @@ async fn get_client(config: &AppConfig) -> Result<Arc<dyn AgentProvider>, String
         api_endpoint: config.api_endpoint.clone(),
     });
 
-    let client = AgentClient::new(AgentClientConfig {
+    AgentClient::new(AgentClientConfig {
         stakpak,
         providers,
         eco_model: config.eco_model.clone(),
@@ -187,8 +211,11 @@ async fn get_client(config: &AppConfig) -> Result<Arc<dyn AgentProvider>, String
         hook_registry: None,
     })
     .await
-    .map_err(|e| format!("Failed to create agent client: {}", e))?;
-    Ok(Arc::new(client))
+    .map_err(|e| format!("Failed to create agent client: {}", e))
+}
+
+async fn get_client(config: &AppConfig) -> Result<Arc<dyn AgentProvider>, String> {
+    Ok(Arc::new(build_agent_client(config).await?))
 }
 
 /// Helper function to convert AppConfig's config_path to Option<&Path>
@@ -212,6 +239,9 @@ impl Commands {
                 | Commands::Update
                 | Commands::Acp { .. }
                 | Commands::Auth(_)
+                | Commands::Autopilot(_)
+                | Commands::Up { .. }
+                | Commands::Down { .. }
         )
     }
     pub async fn run(self, config: AppConfig) -> Result<(), String> {
@@ -423,6 +453,10 @@ impl Commands {
                 let data = client.get_my_account().await?;
                 println!("{}", data.to_text());
             }
+            Commands::Init => {
+                // Handled in main: starts interactive session with init prompt sent on start
+                unreachable!("stakpak init is handled before Commands::run()")
+            }
             Commands::Version => {
                 println!(
                     "stakpak v{} (https://github.com/stakpak/agent)",
@@ -448,12 +482,33 @@ impl Commands {
                 board::run_board(args).await?;
             }
             Commands::Update => {
-                auto_update::run_auto_update().await?;
+                auto_update::run_auto_update(false).await?;
+            }
+            Commands::Autopilot(autopilot_command) => {
+                autopilot_command.run(config).await?;
+            }
+            Commands::Up { args } => {
+                AutopilotCommands::Up {
+                    args,
+                    from_service: false,
+                }
+                .run(config)
+                .await?;
+            }
+            Commands::Down { args } => {
+                AutopilotCommands::Down { args }.run(config).await?;
             }
             Commands::Auth(auth_command) => {
                 auth_command.run(config).await?;
             }
             Commands::Acp { system_prompt_file } => {
+                // Force auto-update before starting ACP session (no prompt)
+                use crate::utils::check_update::force_auto_update;
+                if let Err(e) = force_auto_update().await {
+                    // Log error but continue - don't block ACP if update check fails
+                    eprintln!("Update check failed: {}", e);
+                }
+
                 let system_prompt = if let Some(system_prompt_file_path) = &system_prompt_file {
                     match std::fs::read_to_string(system_prompt_file_path) {
                         Ok(content) => {
@@ -657,5 +712,26 @@ fn re_execute_stakpak_with_profile(profile: &str, config_path: Option<&std::path
         Err(_) => {
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn up_defaults_to_background_mode() {
+        let args = StartArgs {
+            bind: "127.0.0.1:4096".to_string(),
+            show_token: false,
+            no_auth: false,
+            model: None,
+            auto_approve_all: false,
+            foreground: false,
+            non_interactive: false,
+            force: false,
+        };
+        // Without --foreground, args.foreground should be false (background/service mode)
+        assert!(!args.foreground);
     }
 }

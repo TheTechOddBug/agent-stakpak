@@ -1,13 +1,10 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use rmcp::model::Content;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use stakai::Model;
 use stakpak_shared::models::{
-    integrations::openai::{
-        AgentModel, ChatMessage, FunctionCall, MessageContent, Role, Tool, ToolCall,
-    },
+    integrations::openai::{ChatMessage, FunctionCall, MessageContent, Role, Tool, ToolCall},
     llm::{LLMInput, LLMMessage, LLMMessageContent, LLMMessageTypedContent, LLMTokenUsage},
 };
 use uuid::Uuid;
@@ -59,198 +56,6 @@ impl From<&str> for ApiStreamError {
 impl From<String> for ApiStreamError {
     fn from(error_str: String) -> Self {
         ApiStreamError::from(error_str.as_str())
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentSession {
-    pub id: Uuid,
-    pub title: String,
-    pub agent_id: AgentID,
-    pub visibility: AgentSessionVisibility,
-    pub checkpoints: Vec<AgentCheckpointListItem>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
-pub enum AgentID {
-    #[default]
-    #[serde(rename = "pablo:v1")]
-    PabloV1,
-}
-
-impl std::str::FromStr for AgentID {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pablo:v1" => Ok(AgentID::PabloV1),
-            _ => Err(format!("Invalid agent ID: {}", s)),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub enum AgentSessionVisibility {
-    #[serde(rename = "PRIVATE")]
-    Private,
-    #[serde(rename = "PUBLIC")]
-    Public,
-}
-
-impl std::fmt::Display for AgentSessionVisibility {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentSessionVisibility::Private => write!(f, "PRIVATE"),
-            AgentSessionVisibility::Public => write!(f, "PUBLIC"),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentCheckpointListItem {
-    pub id: Uuid,
-    pub status: AgentStatus,
-    pub execution_depth: usize,
-    pub parent: Option<AgentParentCheckpoint>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentSessionListItem {
-    pub id: Uuid,
-    pub agent_id: AgentID,
-    pub visibility: AgentSessionVisibility,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<AgentSession> for AgentSessionListItem {
-    fn from(item: AgentSession) -> Self {
-        Self {
-            id: item.id,
-            agent_id: item.agent_id,
-            visibility: item.visibility,
-            created_at: item.created_at,
-            updated_at: item.updated_at,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AgentParentCheckpoint {
-    pub id: Uuid,
-}
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub enum AgentStatus {
-    #[serde(rename = "RUNNING")]
-    Running,
-    #[serde(rename = "COMPLETE")]
-    Complete,
-    #[serde(rename = "BLOCKED")]
-    Blocked,
-    #[serde(rename = "FAILED")]
-    Failed,
-}
-impl std::fmt::Display for AgentStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentStatus::Running => write!(f, "RUNNING"),
-            AgentStatus::Complete => write!(f, "COMPLETE"),
-            AgentStatus::Blocked => write!(f, "BLOCKED"),
-            AgentStatus::Failed => write!(f, "FAILED"),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RunAgentInput {
-    pub checkpoint_id: Uuid,
-    pub input: AgentInput,
-}
-
-impl PartialEq for RunAgentInput {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RunAgentOutput {
-    pub checkpoint: AgentCheckpointListItem,
-    pub session: AgentSessionListItem,
-    pub output: AgentOutput,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(tag = "agent_id")]
-pub enum AgentInput {
-    #[serde(rename = "pablo:v1")]
-    PabloV1 {
-        messages: Option<Vec<ChatMessage>>,
-        node_states: Option<serde_json::Value>,
-    },
-}
-
-impl AgentInput {
-    pub fn new(agent_id: &AgentID) -> Self {
-        match agent_id {
-            AgentID::PabloV1 => AgentInput::PabloV1 {
-                messages: None,
-                node_states: None,
-            },
-        }
-    }
-    pub fn set_user_prompt(&mut self, prompt: Option<String>) {
-        match self {
-            AgentInput::PabloV1 { messages, .. } => {
-                if let Some(prompt) = prompt {
-                    *messages = Some(vec![ChatMessage {
-                        role: Role::User,
-                        content: Some(MessageContent::String(prompt)),
-                        name: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        usage: None,
-                        ..Default::default()
-                    }]);
-                }
-            }
-        }
-    }
-    pub fn get_agent_id(&self) -> AgentID {
-        match self {
-            AgentInput::PabloV1 { .. } => AgentID::PabloV1,
-        }
-    }
-}
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(tag = "agent_id")]
-pub enum AgentOutput {
-    #[serde(rename = "pablo:v1")]
-    PabloV1 {
-        messages: Vec<ChatMessage>,
-        node_states: serde_json::Value,
-    },
-}
-
-impl AgentOutput {
-    pub fn get_agent_id(&self) -> AgentID {
-        match self {
-            AgentOutput::PabloV1 { .. } => AgentID::PabloV1,
-        }
-    }
-    pub fn get_messages(&self) -> Vec<ChatMessage> {
-        match self {
-            AgentOutput::PabloV1 { messages, .. } => messages.clone(),
-        }
-    }
-    pub fn set_messages(&mut self, new_messages: Vec<ChatMessage>) {
-        match self {
-            AgentOutput::PabloV1 { messages, .. } => *messages = new_messages,
-        }
     }
 }
 
@@ -460,38 +265,6 @@ pub struct CodeIndex {
     pub index: BuildCodeIndexOutput,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct AgentSessionStats {
-    pub aborted_tool_calls: u32,
-    pub analysis_period: Option<String>,
-    pub failed_tool_calls: u32,
-    pub from_date: Option<String>,
-    pub sessions_with_activity: u32,
-    pub successful_tool_calls: u32,
-    pub to_date: Option<String>,
-    pub tools_usage: Vec<ToolUsageStats>,
-    pub total_sessions: u32,
-    pub total_time_saved_seconds: Option<u32>,
-    pub total_tool_calls: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolUsageStats {
-    pub display_name: String,
-    pub time_saved_per_call: Option<f64>,
-    pub time_saved_seconds: Option<u32>,
-    pub tool_name: String,
-    pub usage_counts: ToolUsageCounts,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ToolUsageCounts {
-    pub aborted: u32,
-    pub failed: u32,
-    pub successful: u32,
-    pub total: u32,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RuleBookVisibility {
@@ -648,20 +421,23 @@ pub struct SlackReadRepliesRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SlackSendMessageRequest {
     pub channel: String,
-    pub mrkdwn_text: String,
+    pub markdown_text: String,
     pub thread_ts: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentState {
-    pub agent_model: AgentModel,
+    /// The active model to use for inference
+    pub active_model: Model,
     pub messages: Vec<ChatMessage>,
     pub tools: Option<Vec<Tool>>,
 
     pub llm_input: Option<LLMInput>,
     pub llm_output: Option<LLMOutput>,
 
-    pub metadata: Option<HashMap<String, Value>>,
+    /// Metadata for checkpoint persistence (context trimming state, etc.)
+    /// Loaded from checkpoint on session resume and saved back after inference
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -689,7 +465,13 @@ impl From<&LLMOutput> for ChatMessage {
             let calls: Vec<ToolCall> = items
                 .iter()
                 .filter_map(|item| {
-                    if let LLMMessageTypedContent::ToolCall { id, name, args } = item {
+                    if let LLMMessageTypedContent::ToolCall {
+                        id,
+                        name,
+                        args,
+                        metadata,
+                    } = item
+                    {
                         Some(ToolCall {
                             id: id.clone(),
                             r#type: "function".to_string(),
@@ -697,6 +479,7 @@ impl From<&LLMOutput> for ChatMessage {
                                 name: name.clone(),
                                 arguments: args.to_string(),
                             },
+                            metadata: metadata.clone(),
                         })
                     } else {
                         None
@@ -722,17 +505,18 @@ impl From<&LLMOutput> for ChatMessage {
 
 impl AgentState {
     pub fn new(
-        agent_model: AgentModel,
+        active_model: Model,
         messages: Vec<ChatMessage>,
         tools: Option<Vec<Tool>>,
+        metadata: Option<Value>,
     ) -> Self {
         Self {
-            agent_model,
+            active_model,
             messages,
             tools,
+            metadata,
             llm_input: None,
             llm_output: None,
-            metadata: None,
         }
     }
 
@@ -744,8 +528,8 @@ impl AgentState {
         self.tools = tools;
     }
 
-    pub fn set_agent_model(&mut self, agent_model: AgentModel) {
-        self.agent_model = agent_model;
+    pub fn set_active_model(&mut self, model: Model) {
+        self.active_model = model;
     }
 
     pub fn set_llm_input(&mut self, llm_input: Option<LLMInput>) {

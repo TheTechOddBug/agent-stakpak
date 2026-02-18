@@ -14,7 +14,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use stakpak_shared::models::model_pricing::ContextAware;
 
 /// Left padding for content inside the side panel
 const LEFT_PADDING: &str = "  ";
@@ -69,7 +68,7 @@ pub fn render_side_panel(f: &mut Frame, state: &mut AppState, area: Rect) {
     let context_height = if context_collapsed {
         collapsed_height
     } else {
-        5 // Header + Tokens + Model + Provider
+        6 // Header + Tokens + Model + Provider + Profile
     };
 
     // Billing section is hidden when billing_info is None (local mode)
@@ -183,19 +182,17 @@ fn render_context_section(f: &mut Frame, state: &AppState, area: Rect, collapsed
         ])
     };
 
-    // Token usage
-    let tokens = state.current_message_usage.total_tokens;
-    let context_info = state
-        .llm_model
-        .as_ref()
-        .map(|m| m.context_info())
-        .unwrap_or_default();
-    let max_tokens = context_info.max_tokens as u32;
+    // Get the active model (current_model if set, otherwise default model)
+    let active_model = state.current_model.as_ref().unwrap_or(&state.model);
 
-    // Show N/A when no content yet (tokens == 0)
+    // Token usage - use current message's prompt_tokens for context window utilization
+    // (prompt_tokens represents the actual context size, not accumulated across messages)
+    let tokens = state.current_message_usage.prompt_tokens;
+    let max_tokens = active_model.limit.context as u32;
+
+    // Show tokens info
     if tokens == 0 {
         lines.push(make_row("Tokens", "N/A".to_string(), Color::DarkGray));
-        lines.push(make_row("Model", "N/A".to_string(), Color::DarkGray));
     } else {
         let percentage = if max_tokens > 0 {
             ((tokens as f64 / max_tokens as f64) * 100.0).round() as u32
@@ -206,36 +203,34 @@ fn render_context_section(f: &mut Frame, state: &AppState, area: Rect, collapsed
         lines.push(make_row(
             "Tokens",
             format!(
-                "{} / {}K ({}%)",
+                "{} / {} ({}%)",
                 format_tokens(tokens),
-                max_tokens / 1000,
+                format_tokens(max_tokens),
                 percentage
             ),
             Color::White,
         ));
-
-        // Model name
-        let model_name = state
-            .llm_model
-            .as_ref()
-            .map(|m| m.model_name())
-            .unwrap_or_else(|| state.agent_model.to_string());
-
-        // Truncate model name if needed, assuming label len ~10 ("   Model:")
-        let avail_for_model = area.width as usize - 10;
-        let truncated_model = truncate_string(&model_name, avail_for_model);
-
-        lines.push(make_row("Model", truncated_model, Color::Cyan));
     }
 
-    // Provider - show subscription, auth provider, or config provider
-    let provider_value = match &state.auth_display_info {
-        (_, Some(_), Some(subscription)) => subscription.clone(),
-        (_, Some(auth_provider), None) => auth_provider.clone(),
-        (Some(config_provider), None, None) => config_provider.clone(),
-        _ => "Remote".to_string(),
-    };
-    lines.push(make_row("Provider", provider_value, Color::DarkGray));
+    // Model name - from active model
+    let model_name = &active_model.name;
+
+    // Truncate model name if needed, assuming label len ~10 ("   Model:")
+    let avail_for_model = area.width as usize - 10;
+    let truncated_model = truncate_string(model_name, avail_for_model);
+
+    lines.push(make_row("Model", truncated_model, Color::Cyan));
+
+    // Provider - from active model (display name)
+    let provider = format_provider_display_name(&active_model.provider);
+    lines.push(make_row("Provider", provider, Color::DarkGray));
+
+    // Profile
+    lines.push(make_row(
+        "Profile",
+        state.current_profile_name.clone(),
+        Color::DarkGray,
+    ));
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, area);
@@ -632,29 +627,17 @@ fn render_changeset_section(f: &mut Frame, state: &AppState, area: Rect, collaps
     f.render_widget(paragraph, area);
 }
 
-/// Render the footer section with version and profile
-fn render_footer_section(f: &mut Frame, state: &AppState, area: Rect) {
+/// Render the footer section with version and shortcuts
+fn render_footer_section(f: &mut Frame, _state: &AppState, area: Rect) {
     let mut lines = Vec::new();
 
     let version = env!("CARGO_PKG_VERSION");
-    let profile = &state.current_profile_name;
-    let available_width = area.width as usize;
 
-    // Line 1: Version (left) and Profile (right)
-    let left_part = format!("{}v{}", LEFT_PADDING, version);
-    let right_part = format!("profile {} ", profile);
-    let total_content = left_part.len() + right_part.len();
-    let spacing = available_width.saturating_sub(total_content).max(1);
-
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}v{}", LEFT_PADDING, version),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw(" ".repeat(spacing)),
-        Span::styled("profile ", Style::default().fg(Color::DarkGray)),
-        Span::styled(profile, Style::default().fg(Color::Reset)),
-    ]));
+    // Line 1: Version (left)
+    lines.push(Line::from(vec![Span::styled(
+        format!("{}v{}", LEFT_PADDING, version),
+        Style::default().fg(Color::DarkGray),
+    )]));
 
     // Empty line between version/profile and shortcuts
     lines.push(Line::from(""));
@@ -702,6 +685,28 @@ fn section_header_style(focused: bool) -> Style {
     }
 }
 
+/// Format a provider ID into a human-readable display name.
+///
+/// Maps known provider IDs to their proper display names.
+/// Unknown providers get simple capitalization of the first letter.
+fn format_provider_display_name(provider_id: &str) -> String {
+    match provider_id {
+        "amazon-bedrock" => "Amazon Bedrock".to_string(),
+        "openai" => "OpenAI".to_string(),
+        "anthropic" => "Anthropic".to_string(),
+        "gemini" | "google" => "Google Gemini".to_string(),
+        "stakpak" => "Stakpak".to_string(),
+        other => {
+            // Fallback: capitalize first letter
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 /// Format token count with separators
 fn format_tokens(tokens: u32) -> String {
     if tokens >= 1000 {
@@ -711,14 +716,15 @@ fn format_tokens(tokens: u32) -> String {
     }
 }
 
-/// Truncate a string to fit within a given width
+/// Truncate a string to fit within a given width, respecting char boundaries.
 fn truncate_string(s: &str, max_width: usize) -> String {
-    if s.len() <= max_width {
+    if s.chars().count() <= max_width {
         s.to_string()
     } else if max_width > 3 {
-        format!("{}...", &s[..max_width - 3])
+        let truncated: String = s.chars().take(max_width - 3).collect();
+        format!("{}...", truncated)
     } else {
-        s[..max_width].to_string()
+        s.chars().take(max_width).collect()
     }
 }
 

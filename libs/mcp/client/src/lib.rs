@@ -10,7 +10,6 @@ use stakpak_shared::cert_utils::CertificateChain;
 use stakpak_shared::models::integrations::openai::ToolCallResultProgress;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
-use uuid::Uuid;
 
 mod local;
 
@@ -34,10 +33,22 @@ pub async fn connect_https(
         .pool_max_idle_per_host(10)
         .tcp_keepalive(std::time::Duration::from_secs(60));
 
-    // Configure mTLS if certificate chain is provided
+    // Configure TLS: use mTLS cert chain if provided, otherwise use
+    // platform-verified TLS so the OS CA store is trusted.
     if let Some(cert_chain) = certificate_chain {
         let tls_config = cert_chain.create_client_config()?;
         client_builder = client_builder.use_preconfigured_tls(tls_config);
+    } else {
+        let arc_crypto_provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        if let Ok(tls_config) = rustls::ClientConfig::builder_with_provider(arc_crypto_provider)
+            .with_safe_default_protocol_versions()
+            .map(|builder| {
+                rustls_platform_verifier::BuilderVerifierExt::with_platform_verifier(builder)
+                    .with_no_client_auth()
+            })
+        {
+            client_builder = client_builder.use_preconfigured_tls(tls_config);
+        }
     }
 
     let http_client = client_builder.build()?;
@@ -62,14 +73,10 @@ pub async fn get_tools(client: &McpClient) -> Result<Vec<Tool>> {
 pub async fn call_tool(
     client: &McpClient,
     params: CallToolRequestParam,
-    session_id: Option<Uuid>,
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<RequestHandle<RoleClient>, String> {
-    let mut meta_map = serde_json::Map::new();
-    if let Some(session_id) = session_id {
-        meta_map.insert("session_id".to_string(), serde_json::json!(session_id));
-    }
     let options = PeerRequestOptions {
-        meta: Some(Meta(meta_map)),
+        meta: Some(Meta(metadata.unwrap_or_default())),
         ..Default::default()
     };
     client

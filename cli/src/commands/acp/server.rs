@@ -1,15 +1,21 @@
 use crate::commands::agent::run::helpers::{system_message, user_message};
-use crate::{commands::agent::run::helpers::convert_tools_with_filter, config::AppConfig};
-use agent_client_protocol::{self as acp, Client as AcpClient, SessionNotification};
+use crate::commands::agent::run::stream::ToolCallAccumulator;
+use crate::config::AppConfig;
+use agent_client_protocol::{
+    self as acp, Client as AcpClient, ModelInfo, SessionModelState, SessionNotification,
+    SetSessionModelRequest, SetSessionModelResponse,
+};
 use futures_util::StreamExt;
 use stakpak_api::models::ApiStreamError;
+use stakpak_api::storage::CreateSessionRequest;
 use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, StakpakConfig};
+use stakpak_api::{Model, ModelLimit};
 use stakpak_mcp_client::McpClient;
 use stakpak_shared::models::integrations::mcp::CallToolResultExt;
 use stakpak_shared::models::integrations::openai::{
-    AgentModel, ChatCompletionChoice, ChatCompletionResponse, ChatCompletionStreamResponse,
-    ChatMessage, FinishReason, FunctionCall, FunctionCallDelta, MessageContent, Role, Tool,
-    ToolCall, ToolCallResultProgress, ToolCallResultStatus,
+    ChatCompletionChoice, ChatCompletionResponse, ChatCompletionStreamResponse, ChatMessage,
+    FinishReason, MessageContent, Role, Tool, ToolCall, ToolCallResultProgress,
+    ToolCallResultStatus,
 };
 use stakpak_shared::models::llm::LLMTokenUsage;
 use std::cell::Cell;
@@ -20,8 +26,10 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 use uuid::Uuid;
 
 pub struct StakpakAcpAgent {
-    config: AppConfig,
-    client: Arc<dyn AgentProvider>,
+    config: Arc<tokio::sync::RwLock<AppConfig>>,
+    client: Arc<tokio::sync::RwLock<Arc<dyn AgentProvider>>>,
+    /// Default model to use for chat completions
+    model: Arc<tokio::sync::RwLock<Model>>,
     session_update_tx: mpsc::UnboundedSender<(acp::SessionNotification, oneshot::Sender<()>)>,
     next_session_id: Cell<u64>,
     mcp_client: Option<Arc<McpClient>>,
@@ -54,6 +62,48 @@ pub struct StakpakAcpAgent {
 }
 
 impl StakpakAcpAgent {
+    /// Convert internal Model to ACP ModelInfo
+    fn model_to_acp_model_info(model: &Model) -> ModelInfo {
+        ModelInfo::new(model.id.clone(), model.name.clone())
+            .description(format!("Provider: {}", model.provider))
+    }
+
+    /// Get available models as ACP SessionModelState
+    async fn get_session_model_state(&self) -> SessionModelState {
+        let client = self.client.read().await;
+        let current_model = self.model.read().await;
+
+        let available_models = client.list_models().await;
+        log::debug!(
+            "Available models for ACP: {} models, current: {}",
+            available_models.len(),
+            current_model.id
+        );
+
+        let acp_models: Vec<ModelInfo> = available_models
+            .iter()
+            .map(Self::model_to_acp_model_info)
+            .collect();
+
+        // Ensure currentModelId matches one of the availableModels
+        // If the current model isn't in the list, use the first available model
+        let current_model_id = if available_models.iter().any(|m| m.id == current_model.id) {
+            current_model.id.clone()
+        } else if let Some(first_model) = available_models.first() {
+            log::debug!(
+                "Current model '{}' not in available models, using '{}'",
+                current_model.id,
+                first_model.id
+            );
+            first_model.id.clone()
+        } else {
+            // Fallback if no models available
+            current_model.id.clone()
+        };
+
+        SessionModelState::new(current_model_id, acp_models)
+    }
+
     pub async fn new(
         config: AppConfig,
         session_update_tx: mpsc::UnboundedSender<(acp::SessionNotification, oneshot::Sender<()>)>,
@@ -86,12 +136,48 @@ impl StakpakAcpAgent {
             Arc::new(client)
         };
 
+        // Get default model - use smart_model from config or first available model
+        let model = if let Some(smart_model_str) = &config.smart_model {
+            // Parse the smart_model string to determine provider
+            let provider = if smart_model_str.starts_with("anthropic/")
+                || smart_model_str.contains("claude")
+            {
+                "anthropic"
+            } else if smart_model_str.starts_with("openai/") || smart_model_str.contains("gpt") {
+                "openai"
+            } else if smart_model_str.starts_with("google/") || smart_model_str.contains("gemini") {
+                "google"
+            } else {
+                "stakpak"
+            };
+            Model::custom(smart_model_str.clone(), provider)
+        } else {
+            // Use first available model from client
+            let models = client.list_models().await;
+            models.into_iter().next().unwrap_or_else(|| {
+                // Fallback default: Claude Opus via Stakpak
+                Model::new(
+                    "anthropic/claude-opus-4-5",
+                    "Claude Opus 4.5",
+                    "stakpak",
+                    true,
+                    None,
+                    ModelLimit::default(),
+                )
+            })
+        };
+
         // Initialize MCP client and tools (optional for ACP)
         let (mcp_client, mcp_tools, tools) =
             match Self::initialize_mcp_server_and_tools(&config).await {
-                Ok((client, mcp_tools, tool_list)) => {
+                Ok(result) => {
                     log::info!("MCP client initialized successfully");
-                    (Some(client), mcp_tools, tool_list)
+                    // Hold shutdown handles to keep servers alive
+                    // They'll be dropped when this agent is dropped, which is fine
+                    // since new() is only called once at startup and run_stdio reinitializes
+                    let _server_shutdown = result.server_shutdown_tx;
+                    let _proxy_shutdown = result.proxy_shutdown_tx;
+                    (Some(result.client), result.mcp_tools, result.tools)
                 }
                 Err(e) => {
                     log::warn!(
@@ -112,8 +198,9 @@ impl StakpakAcpAgent {
         };
 
         Ok(Self {
-            config,
-            client,
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            client: Arc::new(tokio::sync::RwLock::new(client)),
+            model: Arc::new(tokio::sync::RwLock::new(model)),
             session_update_tx,
             next_session_id: Cell::new(0),
             mcp_client,
@@ -681,18 +768,7 @@ impl StakpakAcpAgent {
         tool_calls: Vec<ToolCall>,
         session_id: &acp::SessionId,
     ) -> Result<Vec<ChatMessage>, acp::Error> {
-        log::info!(
-            "🔧 DEBUG: Starting tool call processing with {} tool calls",
-            tool_calls.len()
-        );
-        for (i, tool_call) in tool_calls.iter().enumerate() {
-            log::info!(
-                "🔧 DEBUG: Tool call {}: {} (id: {})",
-                i,
-                tool_call.function.name,
-                tool_call.id
-            );
-        }
+        log::info!("Processing {} tool calls", tool_calls.len());
 
         let mut tool_calls_queue = tool_calls;
         let mut results = Vec::new();
@@ -734,8 +810,10 @@ impl StakpakAcpAgent {
             }
             let raw_input = serde_json::from_str(&tool_call.function.arguments)
                 .unwrap_or(serde_json::Value::Null);
-            let tool_title = self.generate_tool_title(&tool_call.function.name, &raw_input);
-            let tool_kind = self.get_tool_kind(&tool_call.function.name);
+            let stripped_name =
+                crate::commands::acp::utils::strip_tool_name(&tool_call.function.name);
+            let tool_title = self.generate_tool_title(stripped_name, &raw_input);
+            let tool_kind = self.get_tool_kind(stripped_name);
 
             // Prepare content and locations for diff tools
             let file_path = raw_input
@@ -761,8 +839,8 @@ impl StakpakAcpAgent {
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| file_path.to_string_lossy().to_string());
 
-            let (content, locations) = if self.should_use_diff_content(&tool_call.function.name) {
-                if self.is_file_creation_tool(&tool_call.function.name) {
+            let (content, locations) = if self.should_use_diff_content(stripped_name) {
+                if self.is_file_creation_tool(stripped_name) {
                     // For file creation: old_text = None, new_text = result_content
                     let diff_content = vec![acp::ToolCallContent::Diff(acp::Diff::new(
                         file_path.clone(),
@@ -799,7 +877,7 @@ impl StakpakAcpAgent {
             .await?;
 
             // Check permissions
-            let permission_granted = if self.is_auto_approved_tool(&tool_call.function.name) {
+            let permission_granted = if self.is_auto_approved_tool(stripped_name) {
                 true
             } else {
                 self.send_permission_request(
@@ -848,15 +926,15 @@ impl StakpakAcpAgent {
 
             // Check if this is a filesystem tool that should use native ACP
             // Decide if this should be handled by native ACP FS. Avoid read_text_file for directories.
-            let is_view_directory = if tool_call.function.name == super::tool_names::VIEW {
+            let is_view_directory = if stripped_name == super::tool_names::VIEW {
                 Path::new(&abs_path).is_dir()
             } else {
                 false
             };
 
-            let tool_name = tool_call.function.name.as_str();
-            let is_read_tool = super::tool_names::is_fs_file_read(tool_name) && !is_view_directory;
-            let is_write_tool = super::tool_names::is_fs_file_write(tool_name);
+            let is_read_tool =
+                super::tool_names::is_fs_file_read(stripped_name) && !is_view_directory;
+            let is_write_tool = super::tool_names::is_fs_file_write(stripped_name);
 
             // Delegate fs operations to the client so it can access unsaved editor
             // state and track modifications. Per ACP spec, both read and write
@@ -884,7 +962,7 @@ impl StakpakAcpAgent {
                     })?
             } else if let Some(ref mcp_client) = self.mcp_client {
                 log::info!(
-                    "🔧 DEBUG: Executing tool call: {} with MCP client",
+                    "Executing tool call: {} with MCP client",
                     tool_call.function.name
                 );
 
@@ -897,6 +975,7 @@ impl StakpakAcpAgent {
                     &tool_call,
                     tool_cancel_rx,
                     self.current_session_id.get(),
+                    Some(self.model.read().await.id.clone()),
                 )
                 .await
                 .map_err(|e| {
@@ -911,11 +990,6 @@ impl StakpakAcpAgent {
                 log::error!("{error_msg}");
                 return Err(acp::Error::internal_error().data(error_msg));
             };
-
-            log::info!(
-                "🔧 DEBUG: Tool call execution completed for: {}",
-                tool_call.function.name
-            );
 
             if let Some(tool_result) = result {
                 // Check if the tool call was cancelled
@@ -965,7 +1039,7 @@ impl StakpakAcpAgent {
                     .join("\n");
 
                 // Send completion notification
-                let completion_content = if self.should_use_diff_content(&tool_call.function.name) {
+                let completion_content = if self.should_use_diff_content(stripped_name) {
                     // For diff tools, we already sent the diff in the initial notification
                     // Just send a simple completion without additional content
                     None
@@ -1052,22 +1126,14 @@ impl StakpakAcpAgent {
 
     pub async fn initialize_mcp_server_and_tools(
         config: &AppConfig,
-    ) -> Result<(Arc<McpClient>, Vec<rmcp::model::Tool>, Vec<Tool>), String> {
-        // Initialize MCP client via stdio proxy
-        let mcp_client = Arc::new(
-            stakpak_mcp_client::connect(None) // progress_tx will be set later in run_stdio
-                .await
-                .map_err(|e| format!("Failed to connect to MCP proxy: {}", e))?,
-        );
+    ) -> Result<crate::commands::agent::run::mcp_init::McpInitResult, String> {
+        use crate::commands::agent::run::mcp_init::{
+            McpInitConfig, initialize_mcp_server_and_tools,
+        };
 
-        // Get tools from MCP client
-        let mcp_tools = stakpak_mcp_client::get_tools(&mcp_client)
-            .await
-            .map_err(|e| format!("Failed to get tools: {}", e))?;
+        let mcp_config = McpInitConfig::default();
 
-        let tools = convert_tools_with_filter(&mcp_tools, config.allowed_tools.as_ref());
-
-        Ok((mcp_client, mcp_tools, tools))
+        initialize_mcp_server_and_tools(config, mcp_config, None).await
     }
 
     async fn process_acp_streaming_response_with_cancellation(
@@ -1076,12 +1142,13 @@ impl StakpakAcpAgent {
         session_id: &acp::SessionId,
     ) -> Result<ChatCompletionResponse, String> {
         let mut stream = Box::pin(stream);
+        let current_model = self.model.read().await;
 
         let mut chat_completion_response = ChatCompletionResponse {
             id: "".to_string(),
             object: "".to_string(),
             created: 0,
-            model: AgentModel::Smart.to_string(),
+            model: current_model.id.clone(),
             choices: vec![],
             usage: LLMTokenUsage {
                 prompt_tokens: 0,
@@ -1102,6 +1169,8 @@ impl StakpakAcpAgent {
             usage: None,
             ..Default::default()
         };
+
+        let mut tool_call_accumulator = ToolCallAccumulator::new();
 
         // Compile regex once outside the loop
         let checkpoint_regex = regex::Regex::new(r"<checkpoint_id>.*?</checkpoint_id>").ok();
@@ -1216,61 +1285,7 @@ impl StakpakAcpAgent {
                     // Handle tool calls streaming
                     if let Some(tool_calls) = &delta.tool_calls {
                         for delta_tool_call in tool_calls {
-                            if chat_message.tool_calls.is_none() {
-                                chat_message.tool_calls = Some(vec![]);
-                            }
-
-                            let tool_calls_vec = chat_message.tool_calls.as_mut();
-                            if let Some(tool_calls_vec) = tool_calls_vec {
-                                match tool_calls_vec.get_mut(delta_tool_call.index) {
-                                    Some(tool_call) => {
-                                        let delta_func = delta_tool_call
-                                            .function
-                                            .as_ref()
-                                            .unwrap_or(&FunctionCallDelta {
-                                                name: None,
-                                                arguments: None,
-                                            });
-                                        tool_call.function.arguments =
-                                            tool_call.function.arguments.clone()
-                                                + delta_func.arguments.as_deref().unwrap_or("");
-                                    }
-                                    None => {
-                                        // push empty tool calls until the index is reached
-                                        tool_calls_vec.extend(
-                                            (tool_calls_vec.len()..delta_tool_call.index).map(
-                                                |_| ToolCall {
-                                                    id: "".to_string(),
-                                                    r#type: "function".to_string(),
-                                                    function: FunctionCall {
-                                                        name: "".to_string(),
-                                                        arguments: "".to_string(),
-                                                    },
-                                                },
-                                            ),
-                                        );
-
-                                        tool_calls_vec.push(ToolCall {
-                                            id: delta_tool_call.id.clone().unwrap_or_default(),
-                                            r#type: "function".to_string(),
-                                            function: FunctionCall {
-                                                name: delta_tool_call
-                                                    .function
-                                                    .as_ref()
-                                                    .unwrap_or(&FunctionCallDelta {
-                                                        name: None,
-                                                        arguments: None,
-                                                    })
-                                                    .name
-                                                    .as_deref()
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                arguments: "".to_string(),
-                                            },
-                                        });
-                                    }
-                                }
-                            }
+                            tool_call_accumulator.process_delta(delta_tool_call);
                         }
                     }
                 }
@@ -1299,17 +1314,13 @@ impl StakpakAcpAgent {
             rx.await.map_err(|_| "Failed to await flushed content")?;
         }
 
-        // filter out empty tool calls
-        chat_message.tool_calls = Some(
-            chat_message
-                .tool_calls
-                .as_ref()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter(|tool_call| !tool_call.id.is_empty())
-                .cloned()
-                .collect::<Vec<ToolCall>>(),
-        );
+        // Get accumulated tool calls (already filtered for empty IDs)
+        let final_tool_calls = tool_call_accumulator.into_tool_calls();
+        chat_message.tool_calls = if final_tool_calls.is_empty() {
+            None
+        } else {
+            Some(final_tool_calls)
+        };
 
         chat_completion_response.choices.push(ChatCompletionChoice {
             index: 0,
@@ -1348,30 +1359,47 @@ impl StakpakAcpAgent {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
                 // Set up progress channel for streaming tool results
-                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ToolCallResultProgress>(100);
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::channel::<ToolCallResultProgress>(100);
 
-                // Reinitialize MCP client with progress channel
-                let (mcp_client, mcp_tools, tools) = match Self::initialize_mcp_server_and_tools(&self.config).await {
-                    Ok((client, mcp_tools, tool_list)) => {
-                        log::info!("MCP client reinitialized with progress channel");
-                        (Some(client), mcp_tools, tool_list)
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to reinitialize MCP client with progress channel: {}, continuing without tools", e);
-                        (None, Vec::new(), Vec::new())
-                    }
-                };
+                // Reinitialize MCP client with progress channel (in-process server + proxy)
+                let config_snapshot = self.config.read().await.clone();
+                let (mcp_client, mcp_tools, tools, _mcp_server_shutdown, _mcp_proxy_shutdown) =
+                    match Self::initialize_mcp_server_and_tools(&config_snapshot).await {
+                        Ok(result) => {
+                            log::info!("MCP client reinitialized in run_stdio");
+                            (
+                                Some(result.client),
+                                result.mcp_tools,
+                                result.tools,
+                                Some(result.server_shutdown_tx),
+                                Some(result.proxy_shutdown_tx),
+                            )
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to reinitialize MCP client: {}, continuing without tools",
+                                e
+                            );
+                            (None, Vec::new(), Vec::new(), None, None)
+                        }
+                    };
 
                 // Create permission request channel
-                let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<(acp::RequestPermissionRequest, oneshot::Sender<acp::RequestPermissionResponse>)>();
+                let (permission_tx, mut permission_rx) = mpsc::unbounded_channel::<(
+                    acp::RequestPermissionRequest,
+                    oneshot::Sender<acp::RequestPermissionResponse>,
+                )>();
 
                 // Create filesystem operation channel for native ACP filesystem operations
-                let (fs_operation_tx, fs_operation_rx) = mpsc::unbounded_channel::<crate::commands::acp::fs_handler::FsOperation>();
+                let (fs_operation_tx, fs_operation_rx) =
+                    mpsc::unbounded_channel::<crate::commands::acp::fs_handler::FsOperation>();
 
                 // Create a new agent with the proper channel
                 let agent = StakpakAcpAgent {
                     config: self.config.clone(),
                     client: self.client.clone(),
+                    model: self.model.clone(),
                     session_update_tx: tx.clone(),
                     next_session_id: self.next_session_id.clone(),
                     mcp_client,
@@ -1400,15 +1428,21 @@ impl StakpakAcpAgent {
                 let conn_arc = Arc::new(conn);
 
                 // Spawn filesystem handler for native ACP filesystem operations
-                crate::commands::acp::fs_handler::spawn_fs_handler(conn_arc.clone(), fs_operation_rx);
+                crate::commands::acp::fs_handler::spawn_fs_handler(
+                    conn_arc.clone(),
+                    fs_operation_rx,
+                );
 
                 // Start a background task to send session notifications to the client
                 let conn_for_notifications = conn_arc.clone();
                 tokio::task::spawn_local(async move {
                     while let Some((session_notification, ack_tx)) = rx.recv().await {
                         log::info!("Sending session notification: {:?}", session_notification);
-                        let result =
-                            AcpClient::session_notification(&*conn_for_notifications, session_notification).await;
+                        let result = AcpClient::session_notification(
+                            &*conn_for_notifications,
+                            session_notification,
+                        )
+                        .await;
                         if let Err(e) = result {
                             log::error!("Failed to send session notification: {}", e);
                             break;
@@ -1423,7 +1457,10 @@ impl StakpakAcpAgent {
                 tokio::task::spawn_local(async move {
                     while let Some((permission_request, response_tx)) = permission_rx.recv().await {
                         log::info!("Sending permission request: {:?}", permission_request);
-                        match conn_for_permissions.request_permission(permission_request).await {
+                        match conn_for_permissions
+                            .request_permission(permission_request)
+                            .await
+                        {
                             Ok(response) => {
                                 log::info!("Permission request response: {:?}", response);
                                 let _ = response_tx.send(response);
@@ -1431,11 +1468,9 @@ impl StakpakAcpAgent {
                             Err(e) => {
                                 log::error!("Permission request failed: {}", e);
                                 // Send a default rejection response
-                                let _ = response_tx.send(
-                                    acp::RequestPermissionResponse::new(
-                                        acp::RequestPermissionOutcome::Cancelled,
-                                    ),
-                                );
+                                let _ = response_tx.send(acp::RequestPermissionResponse::new(
+                                    acp::RequestPermissionOutcome::Cancelled,
+                                ));
                             }
                         }
                     }
@@ -1492,6 +1527,7 @@ impl Clone for StakpakAcpAgent {
         Self {
             config: self.config.clone(),
             client: self.client.clone(),
+            model: self.model.clone(),
             session_update_tx: self.session_update_tx.clone(),
             next_session_id: Cell::new(self.next_session_id.get()),
             mcp_client: self.mcp_client.clone(),
@@ -1528,7 +1564,7 @@ impl acp::Agent for StakpakAcpAgent {
 
         // If no API key, provide an auth method for browser-based authentication
         // This implements ACP Agent Auth - the agent handles the OAuth-like flow internally
-        let auth_methods = if self.config.api_key.is_none() {
+        let auth_methods = if self.config.read().await.api_key.is_none() {
             vec![acp::AuthMethod::new(
                 acp::AuthMethodId::new("stakpak"),
                 "Login to Stakpak",
@@ -1538,7 +1574,11 @@ impl acp::Agent for StakpakAcpAgent {
             Vec::new()
         };
 
+        // Get version from Cargo.toml at compile time
+        let version = env!("CARGO_PKG_VERSION");
+
         Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1)
+            .agent_info(acp::Implementation::new("stakpak", version).title("Stakpak Agent"))
             .agent_capabilities(
                 acp::AgentCapabilities::new()
                     .mcp_capabilities(acp::McpCapabilities::new().http(true).sse(true))
@@ -1579,15 +1619,44 @@ impl acp::Agent for StakpakAcpAgent {
                 return Err(acp::Error::auth_required().data("Invalid API key format".to_string()));
             }
 
-            // Save the API key to config
-            let mut config = self.config.clone();
-            config.api_key = Some(api_key.clone());
-            config.save().map_err(|e| {
-                log::error!("Failed to save API key to config: {}", e);
-                acp::Error::internal_error().data(format!("Failed to save config: {}", e))
-            })?;
+            // Save the API key to config (both disk and in-memory)
+            {
+                let mut config = self.config.write().await;
+                config.api_key = Some(api_key.clone());
+                config.save().map_err(|e| {
+                    log::error!("Failed to save API key to config: {}", e);
+                    acp::Error::internal_error().data(format!("Failed to save config: {}", e))
+                })?;
+            }
 
-            log::info!("Authentication successful, API key saved to config");
+            // Rebuild the AgentClient with the new API key so subsequent
+            // requests use the authenticated Stakpak provider
+            {
+                let config = self.config.read().await;
+                let stakpak = Some(StakpakConfig {
+                    api_key: api_key.clone(),
+                    api_endpoint: config.api_endpoint.clone(),
+                });
+                let new_client = AgentClient::new(AgentClientConfig {
+                    stakpak,
+                    providers: config.get_llm_provider_config(),
+                    eco_model: config.eco_model.clone(),
+                    recovery_model: config.recovery_model.clone(),
+                    smart_model: config.smart_model.clone(),
+                    store_path: None,
+                    hook_registry: None,
+                })
+                .await
+                .map_err(|e| {
+                    log::error!("Failed to rebuild agent client after auth: {}", e);
+                    acp::Error::internal_error().data(format!("Failed to rebuild client: {}", e))
+                })?;
+
+                let mut client = self.client.write().await;
+                *client = Arc::new(new_client);
+            }
+
+            log::info!("Authentication successful, API key saved and client rebuilt");
             return Ok(acp::AuthenticateResponse::new());
         }
 
@@ -1622,23 +1691,23 @@ impl acp::Agent for StakpakAcpAgent {
         log::info!("Received new session request {args:?}");
 
         // Check if we have a valid API key
-        // First check in-memory config, then reload from disk (in case authenticate() saved a new key),
-        // finally check environment variable
-        let has_api_key =
-            self.config.api_key.is_some() || std::env::var("STAKPAK_API_KEY").is_ok() || {
-                // Try to reload config from disk to pick up newly saved API key from authenticate()
-                match crate::config::AppConfig::load(&self.config.profile_name, None::<&str>) {
-                    Ok(fresh_config) => {
-                        if fresh_config.api_key.is_some() {
-                            log::info!("Found API key in refreshed config from disk");
-                            true
-                        } else {
-                            false
-                        }
+        // In-memory config is now always up-to-date since authenticate() updates it directly
+        let config = self.config.read().await;
+        let has_api_key = config.api_key.is_some() || std::env::var("STAKPAK_API_KEY").is_ok() || {
+            // Try to reload config from disk as a fallback (e.g., key set externally)
+            match crate::config::AppConfig::load(&config.profile_name, None::<&str>) {
+                Ok(fresh_config) => {
+                    if fresh_config.api_key.is_some() {
+                        log::info!("Found API key in refreshed config from disk");
+                        true
+                    } else {
+                        false
                     }
-                    Err(_) => false,
                 }
-            };
+                Err(_) => false,
+            }
+        };
+        drop(config);
 
         if !has_api_key {
             log::error!("API key is missing - authentication required");
@@ -1647,27 +1716,61 @@ impl acp::Agent for StakpakAcpAgent {
             ));
         }
 
-        let temp_session_id = Uuid::new_v4();
-        let session_id = acp::SessionId::new(temp_session_id.to_string());
-
-        // Track the current session ID
-        self.current_session_id.set(Some(temp_session_id));
-
-        // Clear message history for new session
-        {
+        // Clear message history for new session and keep system message
+        let system_message = {
             let mut messages = self.messages.lock().await;
-            //copy system message if exists
             let system_message = messages
                 .iter()
                 .find(|msg| msg.role == Role::System)
                 .cloned();
             messages.clear();
-            if let Some(system_message) = system_message {
-                messages.push(system_message);
+            if let Some(ref sys_msg) = system_message {
+                messages.push(sys_msg.clone());
             }
-        }
+            system_message
+        };
 
-        Ok(acp::NewSessionResponse::new(session_id))
+        // Create a cloud session to get a real session ID
+        let client = self.client.read().await.clone();
+        let initial_messages = if let Some(sys_msg) = system_message {
+            vec![sys_msg]
+        } else {
+            vec![crate::commands::agent::run::helpers::user_message(
+                "New session".to_string(),
+            )]
+        };
+
+        let cwd = args.cwd.to_str().map(|s| s.to_string()).unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
+
+        // Use project folder name as session title
+        let title = std::path::Path::new(&cwd)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| format!("ACP: {}", n))
+            .unwrap_or_else(|| "ACP Session".to_string());
+
+        let session_request = CreateSessionRequest::new(title, initial_messages).with_cwd(cwd);
+
+        let cloud_session = client.create_session(&session_request).await.map_err(|e| {
+            log::error!("Failed to create cloud session: {}", e);
+            acp::Error::internal_error().data(format!("Failed to create session: {}", e))
+        })?;
+
+        let session_id = acp::SessionId::new(cloud_session.session_id.to_string());
+
+        // Track the current session ID (now using the cloud session ID)
+        self.current_session_id.set(Some(cloud_session.session_id));
+
+        log::info!("Created cloud session: {}", cloud_session.session_id);
+
+        // Get available models for model selection
+        let model_state = self.get_session_model_state().await;
+
+        Ok(acp::NewSessionResponse::new(session_id).models(model_state))
     }
 
     async fn load_session(
@@ -1686,8 +1789,11 @@ impl acp::Agent for StakpakAcpAgent {
         // Track the loaded session ID
         self.current_session_id.set(Some(session_uuid));
 
+        // Get available models for model selection
+        let model_state = self.get_session_model_state().await;
+
         log::info!("Loaded session: {}", session_id_str);
-        Ok(acp::LoadSessionResponse::new())
+        Ok(acp::LoadSessionResponse::new().models(model_state))
     }
 
     async fn prompt(&self, args: acp::PromptRequest) -> Result<acp::PromptResponse, acp::Error> {
@@ -1734,9 +1840,18 @@ impl acp::Agent for StakpakAcpAgent {
         // Only pass tools if we have any
         let tools_option = if tools.is_empty() { None } else { Some(tools) };
 
-        let (stream, _request_id) = self
-            .client
-            .chat_completion_stream(AgentModel::Smart, messages, tools_option.clone(), None)
+        let client = self.client.read().await.clone();
+        let model = self.model.read().await.clone();
+        let session_id = self.current_session_id.get();
+        let (stream, _request_id) = client
+            .chat_completion_stream(
+                model,
+                messages,
+                tools_option.clone(),
+                None,
+                session_id,
+                None,
+            )
             .await
             .map_err(|e| {
                 log::error!("Chat completion stream failed: {e}");
@@ -1759,8 +1874,10 @@ impl acp::Agent for StakpakAcpAgent {
                 );
             }
         };
-        log::info!("Chat completion successful, response: {:?}", response);
-        log::info!("Response choices count: {}", response.choices.len());
+        log::info!(
+            "Chat completion successful, response choices: {}",
+            response.choices.len()
+        );
         if !response.choices.is_empty() {
             log::info!("First choice message: {:?}", response.choices[0].message);
             log::info!(
@@ -1823,29 +1940,12 @@ impl acp::Agent for StakpakAcpAgent {
             .map(|tc| !tc.is_empty())
             .unwrap_or(false);
 
-        log::info!(
-            "🔧 DEBUG: Initial response has tool calls: {}",
-            has_tool_calls
-        );
-        if has_tool_calls && let Some(tool_calls) = response.choices[0].message.tool_calls.as_ref()
-        {
-            log::info!("🔧 DEBUG: Initial tool calls count: {}", tool_calls.len());
-            for (i, tool_call) in tool_calls.iter().enumerate() {
-                log::info!(
-                    "🔧 DEBUG: Initial tool call {}: {} (id: {})",
-                    i,
-                    tool_call.function.name,
-                    tool_call.id
-                );
-            }
-        }
+        log::info!("Initial response has tool calls: {}", has_tool_calls);
 
         // Create cancellation receiver for tool call processing
         let mut tool_cancel_rx = self.tool_cancel_tx.as_ref().map(|tx| tx.subscribe());
 
         while has_tool_calls {
-            log::info!("🔧 DEBUG: Starting tool call processing loop iteration");
-
             if let Some(ref mut cancel_rx) = tool_cancel_rx
                 && cancel_rx.try_recv().is_ok()
             {
@@ -1929,12 +2029,16 @@ impl acp::Agent for StakpakAcpAgent {
                     messages.clone()
                 };
 
-                let (follow_up_stream, _request_id) = self
-                    .client
+                let client = self.client.read().await.clone();
+                let model = self.model.read().await.clone();
+                let session_id = self.current_session_id.get();
+                let (follow_up_stream, _request_id) = client
                     .chat_completion_stream(
-                        AgentModel::Smart,
+                        model,
                         current_messages.clone(),
                         tools_option.clone(),
+                        None,
+                        session_id,
                         None,
                     )
                     .await
@@ -2054,11 +2158,49 @@ impl acp::Agent for StakpakAcpAgent {
 
         Ok(())
     }
+
+    async fn set_session_model(
+        &self,
+        args: SetSessionModelRequest,
+    ) -> Result<SetSessionModelResponse, acp::Error> {
+        log::info!("Received set_session_model request: {:?}", args);
+
+        let model_id_str = args.model_id.0.to_string();
+
+        // Get available models from the client
+        let client = self.client.read().await;
+        let available_models = client.list_models().await;
+
+        // Find the requested model
+        let selected_model = available_models
+            .into_iter()
+            .find(|m| m.id == model_id_str)
+            .ok_or_else(|| {
+                log::error!("Model not found: {}", model_id_str);
+                acp::Error::invalid_params().data(format!("Model not found: {}", model_id_str))
+            })?;
+
+        // Update the current model
+        {
+            let mut model = self.model.write().await;
+            *model = selected_model.clone();
+        }
+
+        log::info!(
+            "Model switched to: {} ({})",
+            selected_model.name,
+            selected_model.id
+        );
+
+        Ok(SetSessionModelResponse::new())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::commands::acp::tool_names;
+    use stakpak_api::ModelLimit;
     use test_case::test_case;
 
     // Per ACP spec, agents MUST check client capabilities before delegating fs operations.
@@ -2089,5 +2231,251 @@ mod tests {
             "tool={} (read={}, write={}), caps(r={}, w={}) => delegate={}",
             tool_name, is_read_tool, is_write_tool, client_reads, client_writes, should_delegate
         );
+    }
+
+    // Model selection tests
+
+    #[test]
+    fn test_model_to_acp_model_info_basic() {
+        let model = Model::new(
+            "claude-sonnet-4-5-20250514",
+            "Claude Sonnet 4.5",
+            "anthropic",
+            true,
+            None,
+            ModelLimit::default(),
+        );
+
+        let model_info = StakpakAcpAgent::model_to_acp_model_info(&model);
+
+        assert_eq!(model_info.model_id.0.as_ref(), "claude-sonnet-4-5-20250514");
+        assert_eq!(model_info.name, "Claude Sonnet 4.5");
+        assert!(
+            model_info
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("anthropic")
+        );
+    }
+
+    #[test]
+    fn test_model_to_acp_model_info_custom_model() {
+        let model = Model::custom("gpt-4o", "openai");
+
+        let model_info = StakpakAcpAgent::model_to_acp_model_info(&model);
+
+        assert_eq!(model_info.model_id.0.as_ref(), "gpt-4o");
+        // Custom models use ID as name
+        assert_eq!(model_info.name, "gpt-4o");
+        assert!(model_info.description.as_ref().unwrap().contains("openai"));
+    }
+
+    #[test]
+    fn test_model_to_acp_model_info_with_provider_prefix() {
+        let model = Model::new(
+            "anthropic/claude-opus-4-5",
+            "Claude Opus 4.5",
+            "stakpak",
+            true,
+            None,
+            ModelLimit::default(),
+        );
+
+        let model_info = StakpakAcpAgent::model_to_acp_model_info(&model);
+
+        assert_eq!(model_info.model_id.0.as_ref(), "anthropic/claude-opus-4-5");
+        assert_eq!(model_info.name, "Claude Opus 4.5");
+        assert!(model_info.description.as_ref().unwrap().contains("stakpak"));
+    }
+
+    #[test]
+    fn test_session_model_state_creation() {
+        let models = [
+            Model::new(
+                "claude-sonnet-4-5",
+                "Claude Sonnet 4.5",
+                "anthropic",
+                true,
+                None,
+                ModelLimit::default(),
+            ),
+            Model::new(
+                "gpt-4o",
+                "GPT-4o",
+                "openai",
+                false,
+                None,
+                ModelLimit::default(),
+            ),
+        ];
+
+        let acp_models: Vec<ModelInfo> = models
+            .iter()
+            .map(StakpakAcpAgent::model_to_acp_model_info)
+            .collect();
+
+        let state = SessionModelState::new("claude-sonnet-4-5", acp_models);
+
+        assert_eq!(state.current_model_id.0.as_ref(), "claude-sonnet-4-5");
+        assert_eq!(state.available_models.len(), 2);
+        assert_eq!(
+            state.available_models[0].model_id.0.as_ref(),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(state.available_models[1].model_id.0.as_ref(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_find_model_by_id() {
+        let models = [
+            Model::new(
+                "claude-sonnet-4-5",
+                "Claude Sonnet 4.5",
+                "anthropic",
+                true,
+                None,
+                ModelLimit::default(),
+            ),
+            Model::new(
+                "gpt-4o",
+                "GPT-4o",
+                "openai",
+                false,
+                None,
+                ModelLimit::default(),
+            ),
+            Model::new(
+                "gemini-2.0-flash",
+                "Gemini 2.0 Flash",
+                "google",
+                false,
+                None,
+                ModelLimit::default(),
+            ),
+        ];
+
+        // Find existing model
+        let found = models.iter().find(|m| m.id == "gpt-4o");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "GPT-4o");
+
+        // Find non-existing model
+        let not_found = models.iter().find(|m| m.id == "non-existent-model");
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_model_selection_with_provider_prefixed_ids() {
+        // Models with stakpak provider prefix format
+        let models = [
+            Model::new(
+                "anthropic/claude-sonnet-4-5-20250514",
+                "Claude Sonnet 4.5",
+                "stakpak",
+                true,
+                None,
+                ModelLimit::default(),
+            ),
+            Model::new(
+                "openai/gpt-4o",
+                "GPT-4o",
+                "stakpak",
+                false,
+                None,
+                ModelLimit::default(),
+            ),
+        ];
+
+        let model_id = "anthropic/claude-sonnet-4-5-20250514";
+        let found = models.iter().find(|m| m.id == model_id);
+
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Claude Sonnet 4.5");
+        assert_eq!(found.unwrap().provider, "stakpak");
+    }
+
+    #[test]
+    fn test_new_session_response_serialization_with_models() {
+        let models = [
+            ModelInfo::new("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5")
+                .description("Provider: stakpak".to_string()),
+            ModelInfo::new("openai/gpt-4o", "GPT-4o").description("Provider: stakpak".to_string()),
+        ];
+
+        let model_state = SessionModelState::new("anthropic/claude-sonnet-4-5", models.to_vec());
+
+        let response = acp::NewSessionResponse::new(acp::SessionId::new("test-session-123"))
+            .models(model_state);
+
+        let json = serde_json::to_string_pretty(&response).unwrap();
+        println!("NewSessionResponse JSON:\n{}", json);
+
+        // Verify the JSON contains models
+        assert!(
+            json.contains("\"models\""),
+            "JSON should contain models field"
+        );
+        assert!(
+            json.contains("\"currentModelId\""),
+            "JSON should contain currentModelId"
+        );
+        assert!(
+            json.contains("\"availableModels\""),
+            "JSON should contain availableModels"
+        );
+        assert!(
+            json.contains("\"anthropic/claude-sonnet-4-5\""),
+            "JSON should contain model ID"
+        );
+        assert!(
+            json.contains("\"Claude Sonnet 4.5\""),
+            "JSON should contain model name"
+        );
+    }
+
+    #[test]
+    fn test_current_model_must_match_available_models() {
+        // Simulate the logic from get_session_model_state
+        let available_models = [
+            Model::new(
+                "anthropic/claude-sonnet-4-5-20250929",
+                "Claude Sonnet 4.5",
+                "stakpak",
+                true,
+                None,
+                ModelLimit::default(),
+            ),
+            Model::new(
+                "openai/gpt-4o",
+                "GPT-4o",
+                "stakpak",
+                false,
+                None,
+                ModelLimit::default(),
+            ),
+        ];
+
+        // Case 1: Current model matches available
+        let current_model_id = "anthropic/claude-sonnet-4-5-20250929";
+        let resolved_id = if available_models.iter().any(|m| m.id == current_model_id) {
+            current_model_id.to_string()
+        } else if let Some(first) = available_models.first() {
+            first.id.clone()
+        } else {
+            current_model_id.to_string()
+        };
+        assert_eq!(resolved_id, "anthropic/claude-sonnet-4-5-20250929");
+
+        // Case 2: Current model doesn't match - should fallback to first
+        let current_model_id = "some-unknown-model";
+        let resolved_id = if available_models.iter().any(|m| m.id == current_model_id) {
+            current_model_id.to_string()
+        } else if let Some(first) = available_models.first() {
+            first.id.clone()
+        } else {
+            current_model_id.to_string()
+        };
+        assert_eq!(resolved_id, "anthropic/claude-sonnet-4-5-20250929");
     }
 }

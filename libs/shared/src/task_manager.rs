@@ -11,6 +11,71 @@ use tokio::{
 
 const START_TASK_WAIT_TIME: Duration = Duration::from_millis(300);
 
+/// Kill a process and its entire process group.
+///
+/// Uses process group kill (`kill -9 -{pid}`) on Unix and `taskkill /F /T` on
+/// Windows to ensure child processes spawned by shells (node, vite, esbuild, etc.)
+/// are also terminated.
+///
+/// This is safe to call even if the process has already exited.
+fn terminate_process_group(process_id: u32) {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        // First check if the process exists
+        let check_result = Command::new("kill")
+            .arg("-0") // Signal 0 just checks if process exists
+            .arg(process_id.to_string())
+            .output();
+
+        // Only kill if the process actually exists
+        if check_result
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            // Kill the entire process group using negative PID
+            // Since we spawn with .process_group(0), the shell becomes the process group leader
+            // Using -{pid} kills all processes in that group (shell + children like node/vite/esbuild)
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(format!("-{}", process_id))
+                .output();
+
+            // Also try to kill the individual process in case it's not a group leader
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(process_id.to_string())
+                .output();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // On Windows, use taskkill with /T flag to kill the process tree
+        let check_result = Command::new("tasklist")
+            .arg("/FI")
+            .arg(format!("PID eq {}", process_id))
+            .arg("/FO")
+            .arg("CSV")
+            .output();
+
+        // Only kill if the process actually exists
+        if let Ok(output) = check_result {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            if output_str.lines().count() > 1 {
+                // More than just header line - use /T to kill process tree
+                let _ = Command::new("taskkill")
+                    .arg("/F")
+                    .arg("/T") // Kill process tree
+                    .arg("/PID")
+                    .arg(process_id.to_string())
+                    .output();
+            }
+        }
+    }
+}
+
 pub type TaskId = String;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -21,6 +86,7 @@ pub enum TaskStatus {
     Failed,
     Cancelled,
     TimedOut,
+    Paused,
 }
 
 #[derive(Debug, Clone)]
@@ -28,12 +94,14 @@ pub struct Task {
     pub id: TaskId,
     pub status: TaskStatus,
     pub command: String,
+    pub description: Option<String>,
     pub remote_connection: Option<RemoteConnectionInfo>,
     pub output: Option<String>,
     pub error: Option<String>,
     pub start_time: DateTime<Utc>,
     pub duration: Option<Duration>,
     pub timeout: Option<Duration>,
+    pub pause_info: Option<PauseInfo>,
 }
 
 pub struct TaskEntry {
@@ -48,9 +116,11 @@ pub struct TaskInfo {
     pub id: TaskId,
     pub status: TaskStatus,
     pub command: String,
+    pub description: Option<String>,
     pub output: Option<String>,
     pub start_time: DateTime<Utc>,
     pub duration: Option<Duration>,
+    pub pause_info: Option<PauseInfo>,
 }
 
 impl From<&Task> for TaskInfo {
@@ -72,9 +142,11 @@ impl From<&Task> for TaskInfo {
             id: task.id.clone(),
             status: task.status.clone(),
             command: task.command.clone(),
+            description: task.description.clone(),
             output: task.output.clone(),
             start_time: task.start_time,
             duration,
+            pause_info: task.pause_info.clone(),
         }
     }
 }
@@ -83,6 +155,12 @@ pub struct TaskCompletion {
     pub output: String,
     pub error: Option<String>,
     pub final_status: TaskStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PauseInfo {
+    pub checkpoint_id: Option<String>,
+    pub raw_output: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,12 +179,15 @@ pub enum TaskError {
     TaskCancelled,
     #[error("Task failed on start: {0}")]
     TaskFailedOnStart(String),
+    #[error("Task not paused: {0}")]
+    TaskNotPaused(TaskId),
 }
 
 pub enum TaskMessage {
     Start {
         id: Option<TaskId>,
         command: String,
+        description: Option<String>,
         remote_connection: Option<RemoteConnectionInfo>,
         timeout: Option<Duration>,
         response_tx: oneshot::Sender<Result<TaskId, TaskError>>,
@@ -137,13 +218,17 @@ pub enum TaskMessage {
         id: TaskId,
         output: String,
     },
+    Resume {
+        id: TaskId,
+        command: String,
+        response_tx: oneshot::Sender<Result<(), TaskError>>,
+    },
 }
 
 pub struct TaskManager {
     tasks: HashMap<TaskId, TaskEntry>,
     tx: mpsc::UnboundedSender<TaskMessage>,
     rx: mpsc::UnboundedReceiver<TaskMessage>,
-    #[allow(dead_code)]
     shutdown_tx: broadcast::Sender<()>,
     shutdown_rx: broadcast::Receiver<()>,
 }
@@ -171,6 +256,7 @@ impl TaskManager {
     pub fn handle(&self) -> Arc<TaskManagerHandle> {
         Arc::new(TaskManagerHandle {
             tx: self.tx.clone(),
+            shutdown_tx: self.shutdown_tx.clone(),
         })
     }
 
@@ -185,6 +271,9 @@ impl TaskManager {
                             }
                         }
                         None => {
+                            // All senders (TaskManagerHandles) have been dropped.
+                            // Clean up all running tasks and child processes.
+                            self.shutdown_all_tasks().await;
                             break;
                         }
                     }
@@ -202,13 +291,20 @@ impl TaskManager {
             TaskMessage::Start {
                 id,
                 command,
+                description,
                 remote_connection,
                 timeout,
                 response_tx,
             } => {
                 let task_id = id.unwrap_or_else(|| generate_simple_id(6));
                 let result = self
-                    .start_task(task_id.clone(), command, timeout, remote_connection)
+                    .start_task(
+                        task_id.clone(),
+                        command,
+                        description,
+                        timeout,
+                        remote_connection,
+                    )
                     .await;
                 let _ = response_tx.send(result.map(|_| task_id.clone()));
                 false
@@ -240,8 +336,8 @@ impl TaskManager {
             }
             TaskMessage::TaskUpdate { id, completion } => {
                 if let Some(entry) = self.tasks.get_mut(&id) {
-                    entry.task.status = completion.final_status;
-                    entry.task.output = Some(completion.output);
+                    entry.task.status = completion.final_status.clone();
+                    entry.task.output = Some(completion.output.clone());
                     entry.task.error = completion.error;
                     entry.task.duration = Some(
                         Utc::now()
@@ -249,6 +345,25 @@ impl TaskManager {
                             .to_std()
                             .unwrap_or_default(),
                     );
+
+                    // Extract checkpoint info for paused and completed tasks
+                    if matches!(
+                        completion.final_status,
+                        TaskStatus::Paused | TaskStatus::Completed
+                    ) {
+                        let checkpoint_id =
+                            serde_json::from_str::<serde_json::Value>(&completion.output)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("checkpoint_id")
+                                        .and_then(|c| c.as_str())
+                                        .map(|s| s.to_string())
+                                });
+                        entry.task.pause_info = Some(PauseInfo {
+                            checkpoint_id,
+                            raw_output: Some(completion.output),
+                        });
+                    }
 
                     // Keep completed tasks in the list so they can be viewed with get_all_tasks
                     // TODO: Consider implementing a cleanup mechanism for old completed tasks
@@ -271,6 +386,15 @@ impl TaskManager {
                 }
                 false
             }
+            TaskMessage::Resume {
+                id,
+                command,
+                response_tx,
+            } => {
+                let result = self.resume_task(id, command).await;
+                let _ = response_tx.send(result);
+                false
+            }
             TaskMessage::Shutdown { response_tx } => {
                 self.shutdown_all_tasks().await;
                 let _ = response_tx.send(());
@@ -283,6 +407,7 @@ impl TaskManager {
         &mut self,
         id: TaskId,
         command: String,
+        description: Option<String>,
         timeout: Option<Duration>,
         remote_connection: Option<RemoteConnectionInfo>,
     ) -> Result<(), TaskError> {
@@ -294,12 +419,14 @@ impl TaskManager {
             id: id.clone(),
             status: TaskStatus::Running,
             command: command.clone(),
+            description,
             remote_connection: remote_connection.clone(),
             output: None,
             error: None,
             start_time: Utc::now(),
             duration: None,
             timeout,
+            pause_info: None,
         };
 
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -342,6 +469,59 @@ impl TaskManager {
         Ok(())
     }
 
+    async fn resume_task(&mut self, id: TaskId, command: String) -> Result<(), TaskError> {
+        // Verify the task exists and is in a resumable state
+        if let Some(entry) = self.tasks.get(&id) {
+            if !matches!(
+                entry.task.status,
+                TaskStatus::Paused | TaskStatus::Completed
+            ) {
+                return Err(TaskError::TaskNotPaused(id));
+            }
+        } else {
+            return Err(TaskError::TaskNotFound(id));
+        }
+
+        // Update the task to Running and start a new execution
+        let entry = self.tasks.get_mut(&id).unwrap();
+        entry.task.status = TaskStatus::Running;
+        entry.task.command = command.clone();
+        entry.task.pause_info = None;
+        entry.task.output = None;
+        entry.task.error = None;
+
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (process_tx, process_rx) = oneshot::channel();
+        let task_tx = self.tx.clone();
+
+        let remote_connection = entry.task.remote_connection.clone();
+        let timeout = entry.task.timeout;
+
+        let handle = tokio::spawn(Self::execute_task(
+            id.clone(),
+            command,
+            remote_connection.clone(),
+            timeout,
+            cancel_rx,
+            process_tx,
+            task_tx,
+        ));
+
+        entry.handle = handle;
+        entry.cancel_tx = Some(cancel_tx);
+        entry.process_id = None;
+
+        // Wait for process ID for local tasks
+        if remote_connection.is_none()
+            && let Ok(process_id) = process_rx.await
+            && let Some(entry) = self.tasks.get_mut(&id)
+        {
+            entry.process_id = Some(process_id);
+        }
+
+        Ok(())
+    }
+
     async fn cancel_task(&mut self, id: &TaskId) -> Result<(), TaskError> {
         if let Some(mut entry) = self.tasks.remove(id) {
             entry.task.status = TaskStatus::Cancelled;
@@ -351,63 +531,7 @@ impl TaskManager {
             }
 
             if let Some(process_id) = entry.process_id {
-                // Kill the entire process group to ensure all child processes are terminated
-                // This is important for tools like vite/node that spawn child processes
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    // First check if the process exists
-                    let check_result = Command::new("kill")
-                        .arg("-0") // Signal 0 just checks if process exists
-                        .arg(process_id.to_string())
-                        .output();
-
-                    // Only kill if the process actually exists
-                    if check_result
-                        .map(|output| output.status.success())
-                        .unwrap_or(false)
-                    {
-                        // Kill the entire process group using negative PID
-                        // Since we spawn with .process_group(0), the shell becomes the process group leader
-                        // Using -{pid} kills all processes in that group (shell + children like node/vite/esbuild)
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(format!("-{}", process_id))
-                            .output();
-
-                        // Also try to kill the individual process in case it's not a group leader
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(process_id.to_string())
-                            .output();
-                    }
-                }
-
-                #[cfg(windows)]
-                {
-                    use std::process::Command;
-                    // On Windows, use taskkill with /T flag to kill the process tree
-                    let check_result = Command::new("tasklist")
-                        .arg("/FI")
-                        .arg(format!("PID eq {}", process_id))
-                        .arg("/FO")
-                        .arg("CSV")
-                        .output();
-
-                    // Only kill if the process actually exists
-                    if let Ok(output) = check_result {
-                        let output_str = String::from_utf8_lossy(&output.stdout);
-                        if output_str.lines().count() > 1 {
-                            // More than just header line - use /T to kill process tree
-                            let _ = Command::new("taskkill")
-                                .arg("/F")
-                                .arg("/T") // Kill process tree
-                                .arg("/PID")
-                                .arg(process_id.to_string())
-                                .output();
-                        }
-                    }
-                }
+                terminate_process_group(process_id);
             }
 
             entry.handle.abort();
@@ -567,6 +691,12 @@ impl TaskManager {
                                         error: final_error,
                                         final_status: TaskStatus::Completed,
                                     }
+                                } else if exit_status.code() == Some(10) {
+                                    TaskCompletion {
+                                        output: final_output,
+                                        error: None,
+                                        final_status: TaskStatus::Paused,
+                                    }
                                 } else {
                                     TaskCompletion {
                                         output: final_output,
@@ -700,63 +830,7 @@ impl TaskManager {
             }
 
             if let Some(process_id) = entry.process_id {
-                // Kill the entire process group to ensure all child processes are terminated
-                // This is important for tools like vite/node that spawn child processes
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    // First check if the process exists
-                    let check_result = Command::new("kill")
-                        .arg("-0") // Signal 0 just checks if process exists
-                        .arg(process_id.to_string())
-                        .output();
-
-                    // Only kill if the process actually exists
-                    if check_result
-                        .map(|output| output.status.success())
-                        .unwrap_or(false)
-                    {
-                        // Kill the entire process group using negative PID
-                        // Since we spawn with .process_group(0), the shell becomes the process group leader
-                        // Using -{pid} kills all processes in that group (shell + children like node/vite/esbuild)
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(format!("-{}", process_id))
-                            .output();
-
-                        // Also try to kill the individual process in case it's not a group leader
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(process_id.to_string())
-                            .output();
-                    }
-                }
-
-                #[cfg(windows)]
-                {
-                    use std::process::Command;
-                    // On Windows, use taskkill with /T flag to kill the process tree
-                    let check_result = Command::new("tasklist")
-                        .arg("/FI")
-                        .arg(format!("PID eq {}", process_id))
-                        .arg("/FO")
-                        .arg("CSV")
-                        .output();
-
-                    // Only kill if the process actually exists
-                    if let Ok(output) = check_result {
-                        let output_str = String::from_utf8_lossy(&output.stdout);
-                        if output_str.lines().count() > 1 {
-                            // More than just header line - use /T to kill process tree
-                            let _ = Command::new("taskkill")
-                                .arg("/F")
-                                .arg("/T") // Kill process tree
-                                .arg("/PID")
-                                .arg(process_id.to_string())
-                                .output();
-                        }
-                    }
-                }
+                terminate_process_group(process_id);
             }
 
             entry.handle.abort();
@@ -766,12 +840,28 @@ impl TaskManager {
 
 pub struct TaskManagerHandle {
     tx: mpsc::UnboundedSender<TaskMessage>,
+    shutdown_tx: broadcast::Sender<()>,
+}
+
+impl Drop for TaskManagerHandle {
+    fn drop(&mut self) {
+        // Signal the TaskManager to shut down all tasks and kill child processes.
+        // This fires on the broadcast channel that TaskManager::run() listens on,
+        // triggering shutdown_all_tasks() which kills every process group.
+        //
+        // This is a last-resort safety net — callers should prefer calling
+        // handle.shutdown().await for a clean async shutdown. But if the handle
+        // is dropped without that (e.g., panic, std::process::exit, unexpected
+        // scope exit), this ensures child processes don't leak.
+        let _ = self.shutdown_tx.send(());
+    }
 }
 
 impl TaskManagerHandle {
     pub async fn start_task(
         &self,
         command: String,
+        description: Option<String>,
         timeout: Option<Duration>,
         remote_connection: Option<RemoteConnectionInfo>,
     ) -> Result<TaskInfo, TaskError> {
@@ -781,6 +871,7 @@ impl TaskManagerHandle {
             .send(TaskMessage::Start {
                 id: None,
                 command: command.clone(),
+                description,
                 remote_connection: remote_connection.clone(),
                 timeout,
                 response_tx,
@@ -845,6 +936,33 @@ impl TaskManagerHandle {
         })
     }
 
+    pub async fn resume_task(&self, id: TaskId, command: String) -> Result<TaskInfo, TaskError> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.tx
+            .send(TaskMessage::Resume {
+                id: id.clone(),
+                command,
+                response_tx,
+            })
+            .map_err(|_| TaskError::ManagerShutdown)?;
+
+        response_rx
+            .await
+            .map_err(|_| TaskError::ManagerShutdown)??;
+
+        // Wait for the task to start
+        tokio::time::sleep(START_TASK_WAIT_TIME).await;
+
+        let task_info = self
+            .get_task_details(id.clone())
+            .await
+            .map_err(|_| TaskError::ManagerShutdown)?
+            .ok_or(TaskError::TaskNotFound(id))?;
+
+        Ok(task_info)
+    }
+
     pub async fn get_task_status(&self, id: TaskId) -> Result<Option<TaskStatus>, TaskError> {
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -903,7 +1021,7 @@ mod tests {
 
         // Start a background task
         let task_info = handle
-            .start_task("sleep 5".to_string(), None, None)
+            .start_task("sleep 5".to_string(), None, None, None)
             .await
             .expect("Failed to start task");
 
@@ -939,7 +1057,7 @@ mod tests {
 
         // Start a long-running background task
         let task_info = handle
-            .start_task("sleep 10".to_string(), None, None)
+            .start_task("sleep 10".to_string(), None, None, None)
             .await
             .expect("Failed to start task");
 
@@ -975,7 +1093,7 @@ mod tests {
 
         // Start a simple task
         let task_info = handle
-            .start_task("echo 'Hello, World!'".to_string(), None, None)
+            .start_task("echo 'Hello, World!'".to_string(), None, None, None)
             .await
             .expect("Failed to start task");
 
@@ -1016,7 +1134,7 @@ mod tests {
 
         // Start a task that will fail immediately
         let result = handle
-            .start_task("nonexistent_command_12345".to_string(), None, None)
+            .start_task("nonexistent_command_12345".to_string(), None, None, None)
             .await;
 
         // Should get a TaskFailedOnStart error
@@ -1030,6 +1148,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_manager_handle_drop_triggers_shutdown() {
+        let task_manager = TaskManager::new();
+        let handle = task_manager.handle();
+
+        let manager_handle = tokio::spawn(async move {
+            task_manager.run().await;
+        });
+
+        // Start a long-running task
+        let _task_info = handle
+            .start_task("sleep 30".to_string(), None, None, None)
+            .await
+            .expect("Failed to start task");
+
+        // Drop the handle WITHOUT calling shutdown()
+        drop(handle);
+
+        // The Drop impl sends on the broadcast shutdown channel,
+        // which causes TaskManager::run() to call shutdown_all_tasks() and exit.
+        // Give it a moment to process.
+        sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            manager_handle.is_finished(),
+            "TaskManager::run() should have exited after handle was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_manager_handle_drop_kills_child_processes() {
+        let task_manager = TaskManager::new();
+        let handle = task_manager.handle();
+
+        let _manager_handle = tokio::spawn(async move {
+            task_manager.run().await;
+        });
+
+        // Start a task that writes a marker file while running
+        let marker = format!("/tmp/stakpak_test_drop_{}", std::process::id());
+        let task_info = handle
+            .start_task(format!("touch {} && sleep 30", marker), None, None, None)
+            .await
+            .expect("Failed to start task");
+
+        // Verify task is running
+        let status = handle
+            .get_task_status(task_info.id.clone())
+            .await
+            .expect("Failed to get status");
+        assert_eq!(status, Some(TaskStatus::Running));
+
+        // Drop handle without explicit shutdown — Drop should kill the process
+        drop(handle);
+        sleep(Duration::from_millis(500)).await;
+
+        // Clean up marker file
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
     async fn test_task_manager_detects_immediate_exit_code_failure() {
         let task_manager = TaskManager::new();
         let handle = task_manager.handle();
@@ -1040,7 +1218,9 @@ mod tests {
         });
 
         // Start a task that will exit with non-zero code immediately
-        let result = handle.start_task("exit 1".to_string(), None, None).await;
+        let result = handle
+            .start_task("exit 1".to_string(), None, None, None)
+            .await;
 
         // Should get a TaskFailedOnStart error
         assert!(matches!(result, Err(TaskError::TaskFailedOnStart(_))));

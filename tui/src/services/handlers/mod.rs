@@ -3,6 +3,7 @@
 //! This module contains all event handlers organized by functionality.
 //! The main `update()` function routes InputEvents to the appropriate handler modules.
 
+pub mod ask_user;
 mod dialog;
 mod input;
 mod message;
@@ -15,7 +16,7 @@ pub mod tool;
 // Re-export find_image_file_by_name for use in clipboard_paste
 pub use input::find_image_file_by_name;
 
-use crate::app::{AppState, InputEvent, OutputEvent};
+use crate::app::{AppState, InputEvent, OutputEvent, PendingUserMessage};
 use ratatui::layout::Size;
 use tokio::sync::mpsc::Sender;
 
@@ -23,6 +24,74 @@ use tokio::sync::mpsc::Sender;
 pub struct EventChannels<'a> {
     pub output_tx: &'a Sender<OutputEvent>,
     pub input_tx: &'a Sender<InputEvent>,
+}
+
+fn take_merged_pending_user_message(state: &mut AppState) -> Option<PendingUserMessage> {
+    let mut merged = state.pending_user_messages.pop_front()?;
+    while let Some(next) = state.pending_user_messages.pop_front() {
+        merged.merge_from(next);
+    }
+    Some(merged)
+}
+
+fn flush_pending_user_messages_if_idle(
+    state: &mut AppState,
+    input_tx: &Sender<InputEvent>,
+    output_tx: &Sender<OutputEvent>,
+) {
+    if state.loading_manager.is_loading() {
+        return;
+    }
+
+    let Some(pending_message) = take_merged_pending_user_message(state) else {
+        return;
+    };
+
+    let PendingUserMessage {
+        final_input,
+        shell_tool_calls,
+        image_parts,
+        user_message_text,
+    } = pending_message;
+
+    match output_tx.try_send(OutputEvent::UserMessage(
+        final_input,
+        shell_tool_calls,
+        image_parts,
+    )) {
+        Ok(()) => {
+            if let Err(e) = input_tx.try_send(InputEvent::AddUserMessage(user_message_text.clone()))
+            {
+                log::warn!("Failed to send AddUserMessage event: {}", e);
+                message::handle_add_user_message(state, user_message_text);
+            }
+        }
+        Err(
+            tokio::sync::mpsc::error::TrySendError::Full(OutputEvent::UserMessage(
+                final_input,
+                shell_tool_calls,
+                image_parts,
+            ))
+            | tokio::sync::mpsc::error::TrySendError::Closed(OutputEvent::UserMessage(
+                final_input,
+                shell_tool_calls,
+                image_parts,
+            )),
+        ) => {
+            log::warn!("Failed to flush buffered UserMessage event: output channel unavailable");
+            state
+                .pending_user_messages
+                .push_front(PendingUserMessage::new(
+                    final_input,
+                    shell_tool_calls,
+                    image_parts,
+                    user_message_text,
+                ));
+        }
+        Err(_) => {
+            // OutputEvent::UserMessage is always used here.
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -47,6 +116,7 @@ pub fn update(
             | InputEvent::ProfileSwitchFailed(_)
             | InputEvent::RulebooksLoaded(_)
             | InputEvent::CurrentRulebooksLoaded(_)
+            | InputEvent::AvailableModelsLoaded(_)
             | InputEvent::Quit
             | InputEvent::AttemptQuit => {
                 // Allow these events through
@@ -103,6 +173,150 @@ pub fn update(
             InputEvent::MouseClick(col, row) => {
                 popup::handle_file_changes_popup_mouse_click(state, col, row);
                 return;
+            }
+            _ => {
+                // Consume other events to prevent side effects
+                return;
+            }
+        }
+    }
+
+    // Intercept keys for Ask User inline block
+    // Tab toggles focus: focused = navigate inside block, unfocused = scroll freely
+    if state.show_ask_user_popup {
+        match event {
+            InputEvent::HandleEsc | InputEvent::AskUserCancel => {
+                if state.ask_user_focused {
+                    // First Esc unfocuses, second Esc cancels
+                    state.ask_user_focused = false;
+                    ask_user::refresh_ask_user_block_pub(state);
+                } else {
+                    ask_user::handle_ask_user_cancel(state, output_tx);
+                }
+                return;
+            }
+            InputEvent::Tab => {
+                // Toggle focus on the ask_user block
+                state.ask_user_focused = !state.ask_user_focused;
+                if state.ask_user_focused {
+                    // Scroll to bottom to show the block
+                    state.stay_at_bottom = true;
+                }
+                ask_user::refresh_ask_user_block_pub(state);
+                return;
+            }
+            InputEvent::ShowAskUserPopup(tool_call, questions) => {
+                ask_user::handle_show_ask_user_popup(state, tool_call, questions);
+                return;
+            }
+            _ => {}
+        }
+
+        // When focused, intercept navigation keys for block interaction
+        if state.ask_user_focused {
+            match event {
+                InputEvent::AskUserNextTab | InputEvent::CursorRight => {
+                    ask_user::handle_ask_user_next_tab(state);
+                    return;
+                }
+                InputEvent::AskUserPrevTab | InputEvent::CursorLeft => {
+                    ask_user::handle_ask_user_prev_tab(state);
+                    return;
+                }
+                InputEvent::AskUserNextOption | InputEvent::Down | InputEvent::ScrollDown => {
+                    ask_user::handle_ask_user_next_option(state);
+                    return;
+                }
+                InputEvent::AskUserPrevOption | InputEvent::Up | InputEvent::ScrollUp => {
+                    ask_user::handle_ask_user_prev_option(state);
+                    return;
+                }
+                InputEvent::AskUserSelectOption | InputEvent::InputSubmitted => {
+                    ask_user::handle_ask_user_select_option(state, output_tx);
+                    return;
+                }
+                InputEvent::AskUserSubmit => {
+                    ask_user::handle_ask_user_submit(state, output_tx);
+                    return;
+                }
+                InputEvent::AskUserCustomInputChanged(c) => {
+                    ask_user::handle_ask_user_custom_input_changed(state, c);
+                    return;
+                }
+                InputEvent::AskUserCustomInputBackspace => {
+                    ask_user::handle_ask_user_custom_input_backspace(state);
+                    return;
+                }
+                InputEvent::AskUserCustomInputDelete => {
+                    ask_user::handle_ask_user_custom_input_delete(state);
+                    return;
+                }
+                InputEvent::InputChanged(c) => {
+                    if let Some(num) = c.to_digit(10)
+                        && (1..=9).contains(&num)
+                    {
+                        ask_user::handle_ask_user_quick_select(state, num as usize, output_tx);
+                        return;
+                    }
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_changed(state, c);
+                    }
+                    return;
+                }
+                InputEvent::InputBackspace => {
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_backspace(state);
+                    }
+                    return;
+                }
+                InputEvent::InputDelete => {
+                    if ask_user::is_custom_input_selected(state) {
+                        ask_user::handle_ask_user_custom_input_delete(state);
+                    }
+                    return;
+                }
+                _ => {
+                    // Consume other events while focused
+                    return;
+                }
+            }
+        }
+        // When unfocused, all events pass through to normal handlers (scrolling works)
+    }
+
+    // Handle ShowAskUserPopup event even when popup is not visible
+    if let InputEvent::ShowAskUserPopup(tool_call, questions) = event {
+        ask_user::handle_show_ask_user_popup(state, tool_call, questions);
+        return;
+    }
+
+    // Intercept keys for Model Switcher Popup
+    if state.show_model_switcher {
+        match event {
+            InputEvent::HandleEsc => {
+                popup::handle_model_switcher_cancel(state);
+                return;
+            }
+            InputEvent::Up | InputEvent::ScrollUp => {
+                // Navigate up in model list
+                if state.model_switcher_selected > 0 {
+                    state.model_switcher_selected -= 1;
+                }
+                return;
+            }
+            InputEvent::Down | InputEvent::ScrollDown => {
+                // Navigate down in model list
+                if state.model_switcher_selected < state.available_models.len().saturating_sub(1) {
+                    state.model_switcher_selected += 1;
+                }
+                return;
+            }
+            InputEvent::InputSubmitted => {
+                popup::handle_model_switcher_select(state, output_tx);
+                return;
+            }
+            InputEvent::AvailableModelsLoaded(_) => {
+                // Let this fall through to the main handler
             }
             _ => {
                 // Consume other events to prevent side effects
@@ -464,6 +678,9 @@ pub fn update(
         InputEvent::MessageToolCalls(tool_calls) => {
             tool::handle_message_tool_calls(state, tool_calls);
         }
+        InputEvent::StreamToolCallProgress(infos) => {
+            tool::handle_stream_tool_call_progress(state, infos);
+        }
         InputEvent::RetryLastToolCall => {
             tool::handle_retry_tool_call(state, input_tx, cancel_tx);
         }
@@ -630,6 +847,20 @@ pub fn update(
             popup::handle_toggle_more_shortcuts(state);
         }
 
+        // Model switcher handlers
+        InputEvent::ShowModelSwitcher => {
+            popup::handle_show_model_switcher(state, output_tx);
+        }
+        InputEvent::AvailableModelsLoaded(models) => {
+            popup::handle_available_models_loaded(state, models);
+        }
+        InputEvent::ModelSwitcherSelect => {
+            popup::handle_model_switcher_select(state, output_tx);
+        }
+        InputEvent::ModelSwitcherCancel => {
+            popup::handle_model_switcher_cancel(state);
+        }
+
         // Side panel handlers
         InputEvent::ToggleSidePanel => {
             popup::handle_toggle_side_panel(state, input_tx);
@@ -648,6 +879,7 @@ pub fn update(
         InputEvent::AddUserMessage(s) => {
             message::handle_add_user_message(state, s);
         }
+
         InputEvent::HasUserMessage => {
             message::handle_has_user_message(state);
         }
@@ -754,7 +986,266 @@ pub fn update(
         InputEvent::BoardTasksError(err) => {
             misc::handle_board_tasks_error(state, err);
         }
+
+        // Ask User popup events (handled in intercept block above, but need match arms)
+        InputEvent::ShowAskUserPopup(_, _)
+        | InputEvent::AskUserNextTab
+        | InputEvent::AskUserPrevTab
+        | InputEvent::AskUserNextOption
+        | InputEvent::AskUserPrevOption
+        | InputEvent::AskUserSelectOption
+        | InputEvent::AskUserCustomInputChanged(_)
+        | InputEvent::AskUserCustomInputBackspace
+        | InputEvent::AskUserCustomInputDelete
+        | InputEvent::AskUserSubmit
+        | InputEvent::AskUserCancel => {
+            // These are handled in the intercept block above when popup is visible
+            // If we reach here, the popup is not visible, so ignore
+        }
     }
 
+    flush_pending_user_messages_if_idle(state, input_tx, output_tx);
     navigation::adjust_scroll(state, message_area_height, message_area_width);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppStateOptions, LoadingOperation};
+    use crate::services::message::MessageContent;
+    use ratatui::layout::Size;
+    use stakai::Model;
+    use stakpak_shared::models::integrations::openai::{
+        ContentPart, FunctionCall, ToolCall, ToolCallResult, ToolCallResultStatus,
+    };
+    use tokio::sync::mpsc;
+
+    fn build_state() -> AppState {
+        AppState::new(AppStateOptions {
+            latest_version: None,
+            redact_secrets: false,
+            privacy_mode: false,
+            is_git_repo: false,
+            auto_approve_tools: None,
+            allowed_tools: None,
+            input_tx: None,
+            model: Model::default(),
+            editor_command: None,
+            auth_display_info: (None, None, None),
+            board_agent_id: None,
+            init_prompt_content: None,
+        })
+    }
+
+    fn make_tool_result(id: &str) -> ToolCallResult {
+        ToolCallResult {
+            call: ToolCall {
+                id: id.to_string(),
+                r#type: "function".to_string(),
+                function: FunctionCall {
+                    name: "run_command".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                metadata: None,
+            },
+            result: format!("result-{id}"),
+            status: ToolCallResultStatus::Success,
+        }
+    }
+
+    fn make_image_part(label: &str) -> ContentPart {
+        ContentPart {
+            r#type: "text".to_string(),
+            text: Some(label.to_string()),
+            image_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_pending_messages_merges_queue_into_single_user_message() {
+        let mut state = build_state();
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "first".to_string(),
+                Some(vec![make_tool_result("t1")]),
+                vec![make_image_part("img-1")],
+                "first".to_string(),
+            ));
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "second".to_string(),
+                Some(vec![make_tool_result("t2")]),
+                vec![make_image_part("img-2")],
+                "second".to_string(),
+            ));
+
+        let (input_tx, mut input_rx) = mpsc::channel(8);
+        let (output_tx, mut output_rx) = mpsc::channel(8);
+
+        flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
+
+        match output_rx.recv().await {
+            Some(OutputEvent::UserMessage(text, Some(tool_calls), image_parts)) => {
+                assert_eq!(text, "first\n\nsecond");
+                assert_eq!(tool_calls.len(), 2);
+                assert_eq!(image_parts.len(), 2);
+            }
+            other => panic!("unexpected output event: {:?}", other),
+        }
+
+        match input_rx.recv().await {
+            Some(InputEvent::AddUserMessage(text)) => {
+                assert_eq!(text, "first\n\nsecond");
+            }
+            other => panic!("unexpected input event: {:?}", other),
+        }
+
+        assert!(state.pending_user_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_pending_messages_does_not_run_when_busy() {
+        let mut state = build_state();
+        state
+            .loading_manager
+            .start_operation(LoadingOperation::StreamProcessing);
+        state.loading = true;
+
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "queued".to_string(),
+                None,
+                Vec::new(),
+                "queued".to_string(),
+            ));
+
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+
+        flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
+
+        assert!(output_rx.try_recv().is_err());
+        assert!(input_rx.try_recv().is_err());
+        assert_eq!(state.pending_user_messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_messages_requeues_when_output_channel_is_full() {
+        let mut state = build_state();
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "queued".to_string(),
+                Some(vec![make_tool_result("t1")]),
+                vec![make_image_part("img-1")],
+                "queued".to_string(),
+            ));
+
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+
+        let send_res = output_tx.try_send(OutputEvent::RequestTotalUsage);
+        assert!(send_res.is_ok());
+
+        flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
+
+        assert_eq!(state.pending_user_messages.len(), 1);
+        match state.pending_user_messages.front() {
+            Some(message) => {
+                assert_eq!(message.final_input, "queued");
+                assert_eq!(message.user_message_text, "queued");
+            }
+            None => panic!("expected queued pending message"),
+        }
+
+        match output_rx.recv().await {
+            Some(OutputEvent::RequestTotalUsage) => {}
+            other => panic!("unexpected output event: {:?}", other),
+        }
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn flush_pending_messages_falls_back_to_local_user_message_when_input_channel_is_full() {
+        let mut state = build_state();
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "queued".to_string(),
+                None,
+                Vec::new(),
+                "queued".to_string(),
+            ));
+
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+
+        let send_res = input_tx.try_send(InputEvent::ToggleCursorVisible);
+        assert!(send_res.is_ok());
+
+        flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
+
+        match output_rx.recv().await {
+            Some(OutputEvent::UserMessage(text, _, _)) => {
+                assert_eq!(text, "queued");
+            }
+            other => panic!("unexpected output event: {:?}", other),
+        }
+
+        match input_rx.recv().await {
+            Some(InputEvent::ToggleCursorVisible) => {}
+            other => panic!("unexpected input event: {:?}", other),
+        }
+        assert!(input_rx.try_recv().is_err());
+
+        assert!(
+            state
+                .messages
+                .iter()
+                .any(|message| matches!(&message.content, MessageContent::UserMessage(text) if text == "queued"))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_invokes_flush_when_idle() {
+        let mut state = build_state();
+        state
+            .pending_user_messages
+            .push_back(PendingUserMessage::new(
+                "from-update".to_string(),
+                None,
+                Vec::new(),
+                "from-update".to_string(),
+            ));
+
+        let (input_tx, mut input_rx) = mpsc::channel(8);
+        let (output_tx, mut output_rx) = mpsc::channel(8);
+        let (shell_tx, _shell_rx) = mpsc::channel(8);
+
+        update(
+            &mut state,
+            InputEvent::ToggleCursorVisible,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+
+        match output_rx.recv().await {
+            Some(OutputEvent::UserMessage(text, _, _)) => assert_eq!(text, "from-update"),
+            other => panic!("unexpected output event: {:?}", other),
+        }
+
+        match input_rx.recv().await {
+            Some(InputEvent::AddUserMessage(text)) => assert_eq!(text, "from-update"),
+            other => panic!("unexpected input event: {:?}", other),
+        }
+        assert!(state.pending_user_messages.is_empty());
+    }
 }

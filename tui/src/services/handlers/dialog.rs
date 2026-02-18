@@ -366,6 +366,11 @@ pub fn handle_show_confirmation_dialog(
         Uuid::new_v4()
     };
 
+    // Save the previous pending block ID before we overwrite it.
+    // This is needed so we can clean up the first tool's pending block when
+    // subsequent tools are added to the approval bar (see !was_empty branch below).
+    let previous_pending_bash_message_id = state.pending_bash_message_id;
+
     // Use unified run command block for run_command tool calls
     if tool_name == "run_command" {
         // Extract command from tool call arguments
@@ -377,6 +382,26 @@ pub fn handle_show_confirmation_dialog(
             crate::services::bash_block::RunCommandState::Pending,
             Some(message_id),
         ));
+    } else if tool_name == "resume_subagent_task" {
+        // For resume_subagent_task, use the special subagent pending block
+        // Try to get pause info from cached subagent state
+        let pause_info = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+            .ok()
+            .and_then(|args| {
+                args.get("task_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .and_then(|task_id| state.subagent_pause_info.get(&task_id).cloned());
+
+        state
+            .messages
+            .push(Message::render_subagent_resume_pending_block(
+                tool_call.clone(),
+                is_auto_approved,
+                pause_info,
+                Some(message_id),
+            ));
     } else {
         state.messages.push(Message::render_pending_border_block(
             tool_call.clone(),
@@ -396,6 +421,7 @@ pub fn handle_show_confirmation_dialog(
         state.is_dialog_open = true;
     }
     state.loading = false;
+    state.is_streaming = false;
     state.dialog_focused = false;
 
     // check if its skipped
@@ -502,11 +528,26 @@ pub fn handle_show_confirmation_dialog(
             // Remove the pending block we just created since it's not the selected one
             if let Some(pending_id) = state.pending_bash_message_id {
                 state.messages.retain(|m| m.id != pending_id);
-                state.pending_bash_message_id = None;
             }
-            // The bar already has a selected tool showing its pending block
-            // so we don't need to create another one
-            invalidate_message_lines_cache(state);
+            // Also remove the previous pending block (from the first tool call that
+            // was kept when the bar was initially empty). Without this, the first
+            // tool's preview block becomes orphaned and stays stuck in the messages
+            // area while the user cycles through tool calls with arrow keys.
+            if let Some(prev_id) = previous_pending_bash_message_id {
+                state.messages.retain(|m| m.id != prev_id);
+            }
+            state.pending_bash_message_id = None;
+
+            // Re-create the pending block for the currently selected tool in the bar
+            // so the user always sees a preview for the active tab.
+            super::tool::create_pending_block_for_selected_tool(state);
+
+            // Force-invalidate cache — bypass the streaming guard because the user
+            // needs to see the correct preview even if is_streaming is still true.
+            state.assembled_lines_cache = None;
+            state.visible_lines_cache = None;
+            state.message_lines_cache = None;
+            state.collapsed_message_lines_cache = None;
         }
     }
 }

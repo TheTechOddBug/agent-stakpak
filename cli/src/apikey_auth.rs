@@ -18,7 +18,12 @@ fn open_browser(url: &str) -> bool {
 async fn listen_for_callback(url: &str) -> String {
     let start_time = std::time::Instant::now();
     while start_time.elapsed() < std::time::Duration::from_secs(120) {
-        let client = reqwest::Client::new();
+        let client = match stakpak_shared::tls_client::create_tls_client(
+            stakpak_shared::tls_client::TlsClientConfig::default(),
+        ) {
+            Ok(c) => c,
+            Err(_) => return "ERROR".to_string(),
+        };
         let response = client.get(url).send().await;
 
         match response {

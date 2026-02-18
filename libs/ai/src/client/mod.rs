@@ -6,7 +6,7 @@ mod config;
 pub use builder::ClientBuilder;
 pub use config::{ClientConfig, InferenceConfig};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::registry::ProviderRegistry;
 use crate::types::{GenerateRequest, GenerateResponse, GenerateStream};
 
@@ -72,11 +72,11 @@ impl Inference {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use stakai::{Inference, GenerateRequest, Message, Role};
+    /// # use stakai::{Inference, GenerateRequest, Message, Model, Role};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = Inference::new();
     /// let request = GenerateRequest::new(
-    ///     "openai/gpt-4",
+    ///     Model::custom("gpt-4", "openai"),
     ///     vec![Message::new(Role::User, "Hello!")]
     /// );
     /// let response = client.generate(&request).await?;
@@ -98,12 +98,11 @@ impl Inference {
     pub async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse> {
         #[cfg(feature = "tracing")]
         {
-            let (provider_id, _) = self.parse_model(&request.model)?;
             let span = tracing::info_span!(
                 "chat",
                 "gen_ai.operation.name" = "chat",
-                "gen_ai.provider.name" = %provider_id,
-                "gen_ai.request.model" = %request.model,
+                "gen_ai.provider.name" = %request.model.provider,
+                "gen_ai.request.model" = %request.model.id,
                 "gen_ai.request.temperature" = tracing::field::Empty,
                 "gen_ai.request.max_tokens" = tracing::field::Empty,
                 "gen_ai.request.top_p" = tracing::field::Empty,
@@ -114,6 +113,9 @@ impl Inference {
                 "gen_ai.tool.definitions" = tracing::field::Empty,
                 "gen_ai.usage.input_tokens" = tracing::field::Empty,
                 "gen_ai.usage.output_tokens" = tracing::field::Empty,
+                // Non-standard: Cache token metrics (not part of OTel GenAI semantic conventions)
+                "gen_ai.usage.cache_read_input_tokens" = tracing::field::Empty,
+                "gen_ai.usage.cache_write_input_tokens" = tracing::field::Empty,
                 "gen_ai.response.finish_reasons" = tracing::field::Empty,
             );
 
@@ -164,6 +166,16 @@ impl Inference {
                     response.usage.completion_tokens as i64,
                 );
 
+                // Non-standard: Cache token metrics (not part of OTel GenAI semantic conventions)
+                if let Some(cache_read) = response.usage.cache_read_tokens() {
+                    tracing::Span::current()
+                        .record("gen_ai.usage.cache_read_input_tokens", cache_read as i64);
+                }
+                if let Some(cache_write) = response.usage.cache_write_tokens() {
+                    tracing::Span::current()
+                        .record("gen_ai.usage.cache_write_input_tokens", cache_write as i64);
+                }
+
                 // finish_reasons is an array per OTel spec
                 let finish_reason = format!("{:?}", response.finish_reason.unified);
                 let finish_reasons_json =
@@ -188,12 +200,8 @@ impl Inference {
 
     /// Internal generate implementation
     async fn generate_internal(&self, request: &GenerateRequest) -> Result<GenerateResponse> {
-        let (provider_id, model_id) = self.parse_model(&request.model)?;
-        let provider = self.registry.get_provider(&provider_id)?;
-
-        let mut req = request.clone();
-        req.model = model_id.to_string();
-        provider.generate(req).await
+        let provider = self.registry.get_provider(&request.model.provider)?;
+        provider.generate(request.clone()).await
     }
 
     /// Generate a streaming response
@@ -209,12 +217,12 @@ impl Inference {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use stakai::{Inference, GenerateRequest, Message, Role, StreamEvent};
+    /// # use stakai::{Inference, GenerateRequest, Message, Model, Role, StreamEvent};
     /// # use futures::StreamExt;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = Inference::new();
     /// let request = GenerateRequest::new(
-    ///     "openai/gpt-4",
+    ///     Model::custom("gpt-4", "openai"),
     ///     vec![Message::new(Role::User, "Count to 5")]
     /// );
     /// let mut stream = client.stream(&request).await?;
@@ -243,12 +251,11 @@ impl Inference {
     pub async fn stream(&self, request: &GenerateRequest) -> Result<GenerateStream> {
         #[cfg(feature = "tracing")]
         {
-            let (provider_id, _) = self.parse_model(&request.model)?;
             let span = tracing::info_span!(
                 "chat",
                 "gen_ai.operation.name" = "chat",
-                "gen_ai.provider.name" = %provider_id,
-                "gen_ai.request.model" = %request.model,
+                "gen_ai.provider.name" = %request.model.provider,
+                "gen_ai.request.model" = %request.model.id,
                 "gen_ai.request.temperature" = tracing::field::Empty,
                 "gen_ai.request.max_tokens" = tracing::field::Empty,
                 "gen_ai.request.top_p" = tracing::field::Empty,
@@ -259,6 +266,9 @@ impl Inference {
                 "gen_ai.tool.definitions" = tracing::field::Empty,
                 "gen_ai.usage.input_tokens" = tracing::field::Empty,
                 "gen_ai.usage.output_tokens" = tracing::field::Empty,
+                // Non-standard: Cache token metrics (not part of OTel GenAI semantic conventions)
+                "gen_ai.usage.cache_read_input_tokens" = tracing::field::Empty,
+                "gen_ai.usage.cache_write_input_tokens" = tracing::field::Empty,
                 "gen_ai.response.finish_reasons" = tracing::field::Empty,
             );
 
@@ -304,39 +314,8 @@ impl Inference {
 
     /// Internal stream implementation
     async fn stream_internal(&self, request: &GenerateRequest) -> Result<GenerateStream> {
-        let (provider_id, model_id) = self.parse_model(&request.model)?;
-        let provider = self.registry.get_provider(&provider_id)?;
-
-        let mut req = request.clone();
-        req.model = model_id.to_string();
-        provider.stream(req).await
-    }
-
-    /// Parse model string into provider and model ID
-    pub(crate) fn parse_model<'a>(&self, model: &'a str) -> Result<(String, &'a str)> {
-        if let Some((provider, model_id)) = model.split_once('/') {
-            // Explicit provider/model format
-            Ok((provider.to_string(), model_id))
-        } else {
-            // Auto-detect provider from model name
-            let provider = self.detect_provider(model)?;
-            Ok((provider, model))
-        }
-    }
-
-    /// Detect provider from model name using heuristics
-    pub(crate) fn detect_provider(&self, model: &str) -> Result<String> {
-        let model_lower = model.to_lowercase();
-
-        if model_lower.starts_with("gpt-") || model_lower.starts_with("o1-") {
-            Ok("openai".to_string())
-        } else if model_lower.starts_with("claude-") {
-            Ok("anthropic".to_string())
-        } else if model_lower.starts_with("gemini-") {
-            Ok("google".to_string())
-        } else {
-            Err(Error::UnknownProvider(model.to_string()))
-        }
+        let provider = self.registry.get_provider(&request.model.provider)?;
+        provider.stream(request.clone()).await
     }
 
     /// Get the provider registry

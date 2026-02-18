@@ -12,31 +12,21 @@ use uuid::Uuid;
 // =============================================================================
 
 /// Session visibility
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum SessionVisibility {
+    #[default]
     Private,
     Public,
 }
 
-impl Default for SessionVisibility {
-    fn default() -> Self {
-        Self::Private
-    }
-}
-
 /// Session status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum SessionStatus {
+    #[default]
     Active,
     Deleted,
-}
-
-impl Default for SessionStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// Full session with active checkpoint
@@ -101,6 +91,9 @@ pub struct CheckpointSummary {
 pub struct CheckpointState {
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
+    /// Optional metadata for context trimming state, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // =============================================================================
@@ -264,7 +257,7 @@ pub struct SlackReadRepliesRequest {
 #[derive(Debug, Serialize)]
 pub struct SlackSendMessageRequest {
     pub channel: String,
-    pub mrkdwn_text: String,
+    pub markdown_text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
 }
