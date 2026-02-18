@@ -286,13 +286,12 @@ fn render_toast(f: &mut Frame, state: &mut AppState) {
 
     let text = "Copied to clipboard!";
     let padding_x = 2;
-    let border_width = 1; // Left border using "▌"
     let text_width = text.len() + (padding_x * 2);
     let screen = f.area();
 
-    // Box dimensions
-    let box_width = (border_width + text_width) as u16;
-    let box_height = 3u16; // padding top + text + padding bottom
+    // Box dimensions (add 2 for border on each side)
+    let box_width = (text_width + 2) as u16;
+    let box_height = 3u16; // border + text + border
 
     // Position in top-right corner with some margin
     let x = screen.width.saturating_sub(box_width + 2);
@@ -300,35 +299,26 @@ fn render_toast(f: &mut Frame, state: &mut AppState) {
 
     let area = Rect::new(x, y, box_width, box_height);
 
-    // Build lines: empty line, text line, empty line (vertically centered)
-    let padding_str = " ".repeat(text_width);
-    let text_line = format!("{:^width$}", text, width = text_width);
-
-    let lines = vec![
-        ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled("▌", Style::default().fg(Color::Cyan).bg(Color::Black)),
-            ratatui::text::Span::styled(padding_str.clone(), Style::default().bg(Color::Black)),
-        ]),
-        ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled("▌", Style::default().fg(Color::Cyan).bg(Color::Black)),
-            ratatui::text::Span::styled(
-                text_line,
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Black)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-        ]),
-        ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled("▌", Style::default().fg(Color::Cyan).bg(Color::Black)),
-            ratatui::text::Span::styled(padding_str, Style::default().bg(Color::Black)),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines);
-
-    // Clear background and render toast
+    // Clear background
     f.render_widget(ratatui::widgets::Clear, area);
+
+    // Create block with cyan border (matching our popups)
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    // Centered text
+    let text_line = ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+        text,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )]);
+
+    let paragraph = Paragraph::new(text_line)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
     f.render_widget(paragraph, area);
 }
 
