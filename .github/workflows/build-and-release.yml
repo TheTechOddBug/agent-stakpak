@@ -10,8 +10,8 @@ on:
     # - v1.2.3: stable release
     # - v1.2.3-beta.1: beta/prerelease
     tags: ["v*"]
-  pull_request:
-    branches: [main, beta]
+  # pull_request:
+  #   branches: [main, beta]
 
 permissions:
   contents: write
