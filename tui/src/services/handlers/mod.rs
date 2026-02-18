@@ -252,12 +252,6 @@ pub fn update(
                     return;
                 }
                 InputEvent::InputChanged(c) => {
-                    if let Some(num) = c.to_digit(10)
-                        && (1..=9).contains(&num)
-                    {
-                        ask_user::handle_ask_user_quick_select(state, num as usize, output_tx);
-                        return;
-                    }
                     if ask_user::is_custom_input_selected(state) {
                         ask_user::handle_ask_user_custom_input_changed(state, c);
                     }
