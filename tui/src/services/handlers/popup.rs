@@ -201,7 +201,7 @@ pub fn handle_profile_switch_failed(state: &mut AppState, error: String) {
         Some(Style::default().fg(AdaptiveColors::red())),
     ));
     state.messages.push(Message::info(
-        "Staying in current profile. Press Ctrl+P to try again.",
+        "Staying in current profile. Press ctrl+p to try again.",
         None,
     ));
 }
