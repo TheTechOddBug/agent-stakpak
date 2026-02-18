@@ -865,9 +865,19 @@ pub fn handle_show_model_switcher(state: &mut AppState, output_tx: &Sender<Outpu
 
 /// Handle available models loaded event
 pub fn handle_available_models_loaded(state: &mut AppState, models: Vec<Model>) {
-    // Sort models by provider (alphabetically) to match render order in model_switcher.rs
+    // Sort models by provider to match render order in model_switcher.rs
+    // "stakpak" provider always first, then alphabetically
     let mut sorted_models = models;
-    sorted_models.sort_by(|a, b| a.provider.cmp(&b.provider));
+    sorted_models.sort_by(|a, b| {
+        match (
+            a.provider.as_str() == "stakpak",
+            b.provider.as_str() == "stakpak",
+        ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.provider.cmp(&b.provider),
+        }
+    });
     state.available_models = sorted_models;
 
     // Pre-select current model if available and it's in the filtered list
