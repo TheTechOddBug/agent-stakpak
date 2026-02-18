@@ -33,8 +33,8 @@ jobs:
           path: |
             ~/.cargo-docker/registry
             ~/.cargo-docker/git
-          key: docker-cargo-tmptest-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: docker-cargo-tmptest-${{ matrix.target }}-
+          key: docker-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: docker-cargo-${{ matrix.target }}-
 
       - name: Build, test, and verify jemalloc in Alpine
         run: |

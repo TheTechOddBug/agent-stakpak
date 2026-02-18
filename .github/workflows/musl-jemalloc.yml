@@ -1,19 +1,22 @@
 name: musl + jemalloc
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main, beta]
+    paths:
+      - "cli/Cargo.toml"
+      - "cli/src/main.rs"
+      - "Cargo.lock"
+      - ".github/workflows/musl-jemalloc.yml"
+      - ".github/workflows/build-and-release.yml"
 
 env:
   CARGO_TERM_COLOR: always
 
-# Verify that jemalloc correctly overrides musl's allocator for ALL code
-# (including SQLite's embedded C via libsql-ffi). Without the
-# `unprefixed_malloc_on_supported_platforms` feature, jemalloc only handles
-# Rust allocations while SQLite still uses musl's aggressive malloc/free,
-# causing SIGSEGV in sqlite3Close().
+# Lightweight PR guard: verify that jemalloc correctly overrides musl's
+# allocator for ALL code (including SQLite's embedded C via libsql-ffi).
+# The full build+test runs in build-and-release.yml on push to main/beta/tags;
+# this workflow only does a debug build + symbol check to catch regressions early.
 
 jobs:
   verify:
@@ -38,8 +41,8 @@ jobs:
           path: |
             ~/.cargo-docker/registry
             ~/.cargo-docker/git
-          key: docker-cargo-jemalloc-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: docker-cargo-jemalloc-${{ matrix.target }}-
+          key: docker-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: docker-cargo-${{ matrix.target }}-
 
       - name: Build and verify jemalloc overrides system malloc
         run: |
@@ -60,14 +63,13 @@ jobs:
 
               BINARY="target/${{ matrix.target }}/debug/stakpak"
 
-              # On musl+unprefixed jemalloc, malloc should NOT be musl'\''s weak symbol.
               if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
-                echo "FAIL: malloc is a weak (W) symbol — musl'\''s allocator is active, not jemalloc!"
-                echo "      SQLite C code will use musl'\''s aggressive malloc, causing SIGSEGV."
+                echo "FAIL: malloc is a weak (W) symbol — musl allocator active, not jemalloc!"
+                echo "      SQLite C code will use musl aggressive malloc, causing SIGSEGV."
                 echo "      Ensure tikv-jemallocator has unprefixed_malloc_on_supported_platforms feature."
                 nm "$BINARY" | grep " malloc$"
                 exit 1
               fi
 
-              echo "OK: malloc is not musl'\''s weak symbol — jemalloc override is active"
+              echo "OK: malloc is not musl weak symbol — jemalloc override is active"
             '

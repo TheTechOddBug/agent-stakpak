@@ -117,9 +117,17 @@ jobs:
             -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
             ${{ matrix.docker }} sh -c '
               set -euo pipefail
-              apk add --no-cache gcc musl-dev make pkgconfig openssl-dev openssl-libs-static ca-certificates
+              apk add --no-cache gcc musl-dev make binutils pkgconfig openssl-dev openssl-libs-static ca-certificates
               cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
               cargo test --target ${{ matrix.target }} ${{ matrix.features }}
+
+              # Verify jemalloc overrides musl malloc (prevents SQLite SIGSEGV)
+              BINARY="target/${{ matrix.target }}/release/stakpak"
+              if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
+                echo "FAIL: jemalloc not overriding musl malloc — SQLite will SIGSEGV"
+                exit 1
+              fi
+              echo "OK: jemalloc override verified"
             '
 
       - name: Build
@@ -129,6 +137,16 @@ jobs:
       - name: Run tests
         if: ${{ !matrix.docker }}
         run: cargo test --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Verify jemalloc overrides musl malloc
+        if: endsWith(matrix.target, 'linux-musl') && !matrix.docker
+        run: |
+          BINARY="target/${{ matrix.target }}/release/stakpak"
+          if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
+            echo "FAIL: jemalloc not overriding musl malloc — SQLite will SIGSEGV"
+            exit 1
+          fi
+          echo "OK: jemalloc override verified"
 
       - name: Prepare binary
         if: startsWith(github.ref, 'refs/tags/')

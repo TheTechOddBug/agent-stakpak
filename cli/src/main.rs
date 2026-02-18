@@ -13,7 +13,9 @@
 // jemalloc uses prefixed names (_rjem_je_malloc) and only handles Rust allocations via
 // #[global_allocator]. SQLite's embedded C code (compiled via libsql-ffi) calls the
 // system malloc() directly — which on musl is the aggressive allocator that caused the crash.
-#[cfg(feature = "jemalloc")]
+//
+// Gated to Linux only — this fix targets musl; macOS/Windows don't need allocator overrides.
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

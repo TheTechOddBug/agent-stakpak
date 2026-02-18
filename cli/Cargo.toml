@@ -12,6 +12,7 @@ readme = "../README.md"
 default = ["bedrock"]
 bedrock = ["stakpak-shared/bedrock", "stakai/bedrock"]
 jemalloc = ["dep:tikv-jemallocator"]
+libsql-test = []
 
 [dependencies]
 stakpak-api = { workspace = true }
