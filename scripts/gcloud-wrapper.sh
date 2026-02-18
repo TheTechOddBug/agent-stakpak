@@ -25,6 +25,9 @@ if [[ ! -x "$GCLOUD_BIN" ]]; then
     
     "$GCLOUD_DIR/install.sh" --quiet --usage-reporting=false --path-update=false --command-completion=false
     
+    # gke-gcloud-auth-plugin is required for kubectl to authenticate with GKE clusters
+    "$GCLOUD_BIN" components install gke-gcloud-auth-plugin --quiet
+    
     echo "✅ Google Cloud CLI installed successfully" >&2
 fi
 
