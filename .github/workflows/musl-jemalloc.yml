@@ -42,31 +42,31 @@ jobs:
           restore-keys: docker-cargo-jemalloc-${{ matrix.target }}-
 
       - name: Build and verify jemalloc overrides system malloc
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ${{ matrix.docker }}
-          options: >-
-            --user 0:0
-            -v ${{ github.workspace }}:/build
-            -w /build
-            -v /home/runner/.cargo-docker/registry:/usr/local/cargo/registry
-            -v /home/runner/.cargo-docker/git:/usr/local/cargo/git
-          run: |
-            set -euo pipefail
+        run: |
+          mkdir -p ~/.cargo-docker/registry ~/.cargo-docker/git
+          docker run --rm \
+            --user 0:0 \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
+            -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
+            ${{ matrix.docker }} sh -c '
+              set -euo pipefail
 
-            apk add --no-cache gcc musl-dev make binutils
+              apk add --no-cache gcc musl-dev make binutils
 
-            cargo build --target ${{ matrix.target }} --features jemalloc
+              cargo build --target ${{ matrix.target }} --features jemalloc
 
-            BINARY="target/${{ matrix.target }}/debug/stakpak"
+              BINARY="target/${{ matrix.target }}/debug/stakpak"
 
-            # On musl+unprefixed jemalloc, malloc should NOT be musl's weak symbol.
-            if nm "$BINARY" 2>/dev/null | grep -q ' W malloc$'; then
-              echo "FAIL: malloc is a weak (W) symbol — musl's allocator is active, not jemalloc!"
-              echo "      SQLite C code will use musl's aggressive malloc, causing SIGSEGV."
-              echo "      Ensure tikv-jemallocator has 'unprefixed_malloc_on_supported_platforms' feature."
-              nm "$BINARY" | grep ' malloc$'
-              exit 1
-            fi
+              # On musl+unprefixed jemalloc, malloc should NOT be musl'\''s weak symbol.
+              if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
+                echo "FAIL: malloc is a weak (W) symbol — musl'\''s allocator is active, not jemalloc!"
+                echo "      SQLite C code will use musl'\''s aggressive malloc, causing SIGSEGV."
+                echo "      Ensure tikv-jemallocator has unprefixed_malloc_on_supported_platforms feature."
+                nm "$BINARY" | grep " malloc$"
+                exit 1
+              fi
 
-            echo "OK: malloc is not musl's weak symbol — jemalloc override is active"
+              echo "OK: malloc is not musl'\''s weak symbol — jemalloc override is active"
+            '

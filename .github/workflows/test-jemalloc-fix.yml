@@ -37,49 +37,49 @@ jobs:
           restore-keys: docker-cargo-tmptest-${{ matrix.target }}-
 
       - name: Build, test, and verify jemalloc in Alpine
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ${{ matrix.docker }}
-          options: >-
-            --user 0:0
-            -v ${{ github.workspace }}:/build
-            -w /build
-            -v /home/runner/.cargo-docker/registry:/usr/local/cargo/registry
-            -v /home/runner/.cargo-docker/git:/usr/local/cargo/git
-          run: |
-            set -euo pipefail
+        run: |
+          mkdir -p ~/.cargo-docker/registry ~/.cargo-docker/git
+          docker run --rm \
+            --user 0:0 \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
+            -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
+            ${{ matrix.docker }} sh -c '
+              set -euo pipefail
 
-            apk add --no-cache gcc musl-dev make binutils
+              apk add --no-cache gcc musl-dev make binutils
 
-            echo "=== Build with jemalloc ==="
-            cargo build --target ${{ matrix.target }} --features jemalloc
+              echo "=== Build with jemalloc ==="
+              cargo build --target ${{ matrix.target }} --features jemalloc
 
-            echo "=== Test with jemalloc ==="
-            cargo test --workspace --target ${{ matrix.target }} --features jemalloc
+              echo "=== Test with jemalloc ==="
+              cargo test --workspace --target ${{ matrix.target }} --features jemalloc
 
-            echo "=== Verify jemalloc overrides system malloc ==="
-            BINARY="target/${{ matrix.target }}/debug/stakpak"
+              echo "=== Verify jemalloc overrides system malloc ==="
+              BINARY="target/${{ matrix.target }}/debug/stakpak"
 
-            echo "malloc symbols:"
-            nm "$BINARY" | grep ' malloc$' || echo "(no exact malloc match)"
-            nm "$BINARY" | grep '_rjem' | head -5
+              echo "malloc symbols:"
+              nm "$BINARY" | grep " malloc$" || echo "(no exact malloc match)"
+              nm "$BINARY" | grep "_rjem" | head -5
 
-            if nm "$BINARY" | grep -q ' W malloc$'; then
-              echo "FAIL: malloc is weak (W) — musl allocator active, jemalloc NOT overriding"
-              exit 1
-            fi
+              if nm "$BINARY" | grep -q " W malloc$"; then
+                echo "FAIL: malloc is weak (W) — musl allocator active, jemalloc NOT overriding"
+                exit 1
+              fi
 
-            echo "OK: jemalloc overrides system malloc"
+              echo "OK: jemalloc overrides system malloc"
 
-            echo "=== Build release binary ==="
-            cargo build --release --target ${{ matrix.target }} --features jemalloc
+              echo "=== Build release binary ==="
+              cargo build --release --target ${{ matrix.target }} --features jemalloc
 
-            RELEASE_BINARY="target/${{ matrix.target }}/release/stakpak"
-            echo "Release binary size: $(du -h "$RELEASE_BINARY" | cut -f1)"
+              RELEASE_BINARY="target/${{ matrix.target }}/release/stakpak"
+              echo "Release binary size: $(du -h "$RELEASE_BINARY" | cut -f1)"
 
-            if nm "$RELEASE_BINARY" 2>/dev/null | grep -q ' W malloc$'; then
-              echo "FAIL: release binary still uses musl malloc"
-              exit 1
-            fi
+              if nm "$RELEASE_BINARY" 2>/dev/null | grep -q " W malloc$"; then
+                echo "FAIL: release binary still uses musl malloc"
+                exit 1
+              fi
 
-            echo "OK: release binary also uses jemalloc"
+              echo "OK: release binary also uses jemalloc"
+            '

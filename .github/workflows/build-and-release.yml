@@ -102,22 +102,24 @@ jobs:
       # Alpine Linux is musl-native — GCC has full C11 atomics support
       # without the broken musl-gcc wrapper that Ubuntu's musl-tools uses.
       # This is the same approach Turso uses for libsql aarch64-musl builds.
+      # Uses plain `docker run` instead of addnab/docker-run-action because
+      # the action bundles an old Docker client incompatible with newer runners.
       - name: Build and test in Alpine container
         if: matrix.docker
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ${{ matrix.docker }}
-          options: >-
-            --user 0:0
-            -v ${{ github.workspace }}:/build
-            -w /build
-            -v /home/runner/.cargo-docker/registry:/usr/local/cargo/registry
-            -v /home/runner/.cargo-docker/git:/usr/local/cargo/git
-          run: |
-            set -euo pipefail
-            apk add --no-cache gcc musl-dev make
-            cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
-            cargo test --target ${{ matrix.target }} ${{ matrix.features }}
+        run: |
+          mkdir -p ~/.cargo-docker/registry ~/.cargo-docker/git
+          docker run --rm \
+            --user 0:0 \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
+            -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
+            ${{ matrix.docker }} sh -c '
+              set -euo pipefail
+              apk add --no-cache gcc musl-dev make
+              cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+              cargo test --target ${{ matrix.target }} ${{ matrix.features }}
+            '
 
       - name: Build
         if: ${{ !matrix.docker }}
