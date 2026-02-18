@@ -13,9 +13,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Lightweight PR guard: verify jemalloc overrides musl's allocator for ALL code
-# (including SQLite's embedded C via libsql-ffi). Full build+test runs in
-# build-and-release.yml on push to main/beta/tags.
+# Lightweight PR guard: verify jemalloc overrides musl's allocator for ALL code.
+# x86_64 runs natively; aarch64 needs Alpine (Ubuntu musl-gcc lacks C11 atomics on ARM).
+# Full build+test runs in build-and-release.yml on push to main/beta/tags.
 
 jobs:
   verify:
@@ -27,33 +27,71 @@ jobs:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
+            docker: rust:1.91-alpine3.21
             runner: ubuntu-22.04-arm
 
     steps:
       - uses: actions/checkout@v4
 
+      # --- Native path (x86_64) ---
       - name: Install Rust
+        if: ${{ !matrix.docker }}
         uses: dtolnay/rust-toolchain@1.91.0
         with:
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
+        if: ${{ !matrix.docker }}
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}
 
       - name: Install MUSL tools
+        if: ${{ !matrix.docker }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Build and verify jemalloc overrides system malloc
+      - name: Build and verify (native)
+        if: ${{ !matrix.docker }}
         run: |
           cargo build --target ${{ matrix.target }} --features jemalloc
-
           BINARY="target/${{ matrix.target }}/debug/stakpak"
-
           if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
             echo "FAIL: malloc is weak (W) — musl allocator active, not jemalloc"
             exit 1
           fi
-
           echo "OK: jemalloc override verified"
+
+      # --- Alpine path (aarch64) ---
+      - name: Docker cargo cache
+        if: matrix.docker
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo-docker/registry
+            ~/.cargo-docker/git
+          key: docker-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: docker-cargo-${{ matrix.target }}-
+
+      - name: Build and verify (Alpine)
+        if: matrix.docker
+        run: |
+          mkdir -p ~/.cargo-docker/registry ~/.cargo-docker/git
+          docker run --rm \
+            --user 0:0 \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
+            -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
+            -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+            ${{ matrix.docker }} sh -c '
+              set -euo pipefail
+              apk add --no-cache gcc musl-dev make binutils pkgconfig openssl-dev openssl-libs-static ca-certificates
+              cargo build --target ${{ matrix.target }} --features jemalloc
+
+              BINARY="target/${{ matrix.target }}/debug/stakpak"
+              if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
+                echo "FAIL: malloc is weak (W) — musl allocator active, not jemalloc"
+                exit 1
+              fi
+              echo "OK: jemalloc override verified"
+            '
