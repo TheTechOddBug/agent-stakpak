@@ -53,7 +53,7 @@ jobs:
             ${{ matrix.docker }} sh -c '
               set -euo pipefail
 
-              apk add --no-cache gcc musl-dev make binutils pkgconfig openssl-dev openssl-libs-static
+              apk add --no-cache gcc musl-dev make binutils pkgconfig openssl-dev openssl-libs-static ca-certificates
 
               cargo build --target ${{ matrix.target }} --features jemalloc
 

@@ -116,7 +116,7 @@ jobs:
             -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
             ${{ matrix.docker }} sh -c '
               set -euo pipefail
-              apk add --no-cache gcc musl-dev make pkgconfig openssl-dev openssl-libs-static
+              apk add --no-cache gcc musl-dev make pkgconfig openssl-dev openssl-libs-static ca-certificates
               cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
               cargo test --target ${{ matrix.target }} ${{ matrix.features }}
             '
