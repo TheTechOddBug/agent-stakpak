@@ -15,11 +15,11 @@
 //! - Left/Right arrows navigate between tabs
 //! - Enter confirms all decisions and executes
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
-use ratatui::Frame;
 use stakpak_shared::models::integrations::openai::ToolCall;
 
 /// Approval status for a tool call
