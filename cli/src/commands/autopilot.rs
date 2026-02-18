@@ -1039,6 +1039,8 @@ async fn start_foreground_runtime(
     let warden_path = crate::commands::warden::get_warden_plugin_path().await;
     let stakpak_image = crate::commands::warden::stakpak_agent_image();
     let volumes = crate::commands::warden::prepare_volumes(config, false);
+    // Pre-create named volumes to prevent race conditions when parallel sandboxes start
+    stakpak_shared::container::ensure_named_volumes_exist();
     let sandbox_config = stakpak_server::SandboxConfig {
         warden_path,
         image: stakpak_image.clone(),

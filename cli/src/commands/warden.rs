@@ -79,6 +79,9 @@ impl WardenCommands {
                     cmd.args(["--env", &env_var]);
                 }
 
+                // Pre-create named volumes to prevent race conditions
+                stakpak_shared::container::ensure_named_volumes_exist();
+
                 // Prepare volumes from config first, then add user-specified volumes
                 // User volumes come last to allow overrides
                 for vol in prepare_volumes(&config, false) {

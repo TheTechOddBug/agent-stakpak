@@ -75,6 +75,23 @@ pub fn is_named_volume(host_part: &str) -> bool {
         && !host_part.contains('/')
 }
 
+/// Pre-create any Docker named volumes found in [`stakpak_agent_default_mounts`].
+///
+/// Running `docker volume create` is idempotent and prevents a race condition
+/// when multiple sandbox containers first-use the same named volume in parallel.
+pub fn ensure_named_volumes_exist() {
+    for vol in stakpak_agent_default_mounts() {
+        let host_part = vol.split(':').next().unwrap_or(&vol);
+        if is_named_volume(host_part) {
+            let _ = Command::new("docker")
+                .args(["volume", "create", host_part])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContainerConfig {
     pub image: String,

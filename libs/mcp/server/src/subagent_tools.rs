@@ -483,9 +483,12 @@ NOTES:
         // If sandbox mode is enabled, wrap the command in warden
         if enable_sandbox {
             use stakpak_shared::container::{
-                expand_volume_path, is_named_volume, stakpak_agent_default_mounts,
-                stakpak_agent_image,
+                ensure_named_volumes_exist, expand_volume_path, is_named_volume,
+                stakpak_agent_default_mounts, stakpak_agent_image,
             };
+
+            // Pre-create named volumes to prevent race conditions with parallel subagents
+            ensure_named_volumes_exist();
 
             let stakpak_image = stakpak_agent_image();
 
