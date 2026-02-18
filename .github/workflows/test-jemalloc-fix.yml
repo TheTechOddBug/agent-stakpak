@@ -18,69 +18,53 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            docker: rust:1.91-alpine3.21
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
-            docker: rust:1.91-alpine3.21
             runner: ubuntu-22.04-arm
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Docker cargo cache
-        uses: actions/cache@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.0
         with:
-          path: |
-            ~/.cargo-docker/registry
-            ~/.cargo-docker/git
-          key: docker-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: docker-cargo-${{ matrix.target }}-
+          targets: ${{ matrix.target }}
 
-      - name: Build, test, and verify jemalloc in Alpine
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Install MUSL tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build, test, and verify jemalloc
         run: |
-          mkdir -p ~/.cargo-docker/registry ~/.cargo-docker/git
-          docker run --rm \
-            --user 0:0 \
-            -v "${{ github.workspace }}:/build" \
-            -w /build \
-            -v "$HOME/.cargo-docker/registry:/usr/local/cargo/registry" \
-            -v "$HOME/.cargo-docker/git:/usr/local/cargo/git" \
-            -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-            ${{ matrix.docker }} sh -c '
-              set -euo pipefail
+          echo "=== Build with jemalloc ==="
+          cargo build --target ${{ matrix.target }} --features jemalloc
 
-              apk add --no-cache gcc musl-dev make binutils pkgconfig openssl-dev openssl-libs-static ca-certificates
+          echo "=== Test with jemalloc ==="
+          cargo test --workspace --target ${{ matrix.target }} --features jemalloc
 
-              echo "=== Build with jemalloc ==="
-              cargo build --target ${{ matrix.target }} --features jemalloc
+          echo "=== Verify jemalloc overrides system malloc ==="
+          BINARY="target/${{ matrix.target }}/debug/stakpak"
 
-              echo "=== Test with jemalloc ==="
-              cargo test --workspace --target ${{ matrix.target }} --features jemalloc
+          if nm "$BINARY" 2>/dev/null | grep -q " W malloc$"; then
+            echo "FAIL: malloc is weak (W) — musl allocator active, jemalloc NOT overriding"
+            exit 1
+          fi
 
-              echo "=== Verify jemalloc overrides system malloc ==="
-              BINARY="target/${{ matrix.target }}/debug/stakpak"
+          echo "OK: jemalloc overrides system malloc"
 
-              echo "malloc symbols:"
-              nm "$BINARY" | grep " malloc$" || echo "(no exact malloc match)"
-              nm "$BINARY" | grep "_rjem" | head -5
+          echo "=== Build release binary ==="
+          cargo build --release --target ${{ matrix.target }} --features jemalloc
 
-              if nm "$BINARY" | grep -q " W malloc$"; then
-                echo "FAIL: malloc is weak (W) — musl allocator active, jemalloc NOT overriding"
-                exit 1
-              fi
+          RELEASE_BINARY="target/${{ matrix.target }}/release/stakpak"
+          echo "Release binary size: $(du -h "$RELEASE_BINARY" | cut -f1)"
 
-              echo "OK: jemalloc overrides system malloc"
+          if nm "$RELEASE_BINARY" 2>/dev/null | grep -q " W malloc$"; then
+            echo "FAIL: release binary still uses musl malloc"
+            exit 1
+          fi
 
-              echo "=== Build release binary ==="
-              cargo build --release --target ${{ matrix.target }} --features jemalloc
-
-              RELEASE_BINARY="target/${{ matrix.target }}/release/stakpak"
-              echo "Release binary size: $(du -h "$RELEASE_BINARY" | cut -f1)"
-
-              if nm "$RELEASE_BINARY" 2>/dev/null | grep -q " W malloc$"; then
-                echo "FAIL: release binary still uses musl malloc"
-                exit 1
-              fi
-
-              echo "OK: release binary also uses jemalloc"
-            '
+          echo "OK: release binary also uses jemalloc"
