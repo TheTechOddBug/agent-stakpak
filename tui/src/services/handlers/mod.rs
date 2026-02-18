@@ -297,22 +297,93 @@ pub fn update(
                 popup::handle_model_switcher_cancel(state);
                 return;
             }
+            InputEvent::Tab => {
+                // Switch between tabs: All <-> Reasoning
+                state.model_switcher_mode = match state.model_switcher_mode {
+                    crate::app::ModelSwitcherMode::All => crate::app::ModelSwitcherMode::Reasoning,
+                    crate::app::ModelSwitcherMode::Reasoning => crate::app::ModelSwitcherMode::All,
+                };
+                // Reset selection when switching tabs and ensure it's valid
+                let filtered = crate::services::model_switcher::filter_models(
+                    &state.available_models,
+                    state.model_switcher_mode,
+                    &state.model_switcher_search,
+                );
+                state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
+                return;
+            }
             InputEvent::Up | InputEvent::ScrollUp => {
-                // Navigate up in model list
-                if state.model_switcher_selected > 0 {
-                    state.model_switcher_selected -= 1;
+                // Navigate up in filtered model list
+                let filtered = crate::services::model_switcher::filter_models(
+                    &state.available_models,
+                    state.model_switcher_mode,
+                    &state.model_switcher_search,
+                );
+                if !filtered.is_empty() {
+                    // Find current position in filtered list
+                    let current_pos = filtered
+                        .iter()
+                        .position(|&idx| idx == state.model_switcher_selected)
+                        .unwrap_or(0);
+                    // Move up (with wrap)
+                    let new_pos = if current_pos > 0 {
+                        current_pos - 1
+                    } else {
+                        filtered.len() - 1
+                    };
+                    state.model_switcher_selected = filtered[new_pos];
                 }
                 return;
             }
             InputEvent::Down | InputEvent::ScrollDown => {
-                // Navigate down in model list
-                if state.model_switcher_selected < state.available_models.len().saturating_sub(1) {
-                    state.model_switcher_selected += 1;
+                // Navigate down in filtered model list
+                let filtered = crate::services::model_switcher::filter_models(
+                    &state.available_models,
+                    state.model_switcher_mode,
+                    &state.model_switcher_search,
+                );
+                if !filtered.is_empty() {
+                    // Find current position in filtered list
+                    let current_pos = filtered
+                        .iter()
+                        .position(|&idx| idx == state.model_switcher_selected)
+                        .unwrap_or(0);
+                    // Move down (with wrap)
+                    let new_pos = if current_pos < filtered.len() - 1 {
+                        current_pos + 1
+                    } else {
+                        0
+                    };
+                    state.model_switcher_selected = filtered[new_pos];
                 }
                 return;
             }
             InputEvent::InputSubmitted => {
                 popup::handle_model_switcher_select(state, output_tx);
+                return;
+            }
+            InputEvent::InputChanged(c) | InputEvent::ModelSwitcherSearchInputChanged(c) => {
+                // Add character to search
+                state.model_switcher_search.push(c);
+                // Reset selection to first filtered result
+                let filtered = crate::services::model_switcher::filter_models(
+                    &state.available_models,
+                    state.model_switcher_mode,
+                    &state.model_switcher_search,
+                );
+                state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
+                return;
+            }
+            InputEvent::InputBackspace | InputEvent::ModelSwitcherSearchBackspace => {
+                // Remove character from search
+                state.model_switcher_search.pop();
+                // Reset selection to first filtered result
+                let filtered = crate::services::model_switcher::filter_models(
+                    &state.available_models,
+                    state.model_switcher_mode,
+                    &state.model_switcher_search,
+                );
+                state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
                 return;
             }
             InputEvent::AvailableModelsLoaded(_) => {
@@ -859,6 +930,11 @@ pub fn update(
         }
         InputEvent::ModelSwitcherCancel => {
             popup::handle_model_switcher_cancel(state);
+        }
+        InputEvent::ModelSwitcherSearchInputChanged(_)
+        | InputEvent::ModelSwitcherSearchBackspace => {
+            // These are handled in the model switcher intercept block above
+            // If we reach here, the model switcher is not visible, so ignore
         }
 
         // Side panel handlers

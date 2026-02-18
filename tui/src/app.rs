@@ -171,6 +171,8 @@ pub struct AppState {
     pub available_models: Vec<Model>,
     pub model_switcher_selected: usize,
     pub current_model: Option<Model>,
+    pub model_switcher_mode: ModelSwitcherMode,
+    pub model_switcher_search: String,
 
     // ========== Command Palette State ==========
     pub show_command_palette: bool,
@@ -479,6 +481,8 @@ impl AppState {
             available_models: Vec::new(),
             model_switcher_selected: 0,
             current_model: None,
+            model_switcher_mode: ModelSwitcherMode::default(),
+            model_switcher_search: String::new(),
             // Command palette initialization
             show_command_palette: false,
             command_palette_selected: 0,

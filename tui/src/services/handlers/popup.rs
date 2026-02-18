@@ -858,6 +858,9 @@ pub fn handle_show_model_switcher(state: &mut AppState, output_tx: &Sender<Outpu
 
     state.show_model_switcher = true;
     state.model_switcher_selected = 0;
+    // Reset filter mode and search when opening
+    state.model_switcher_mode = crate::app::ModelSwitcherMode::default();
+    state.model_switcher_search.clear();
 }
 
 /// Handle available models loaded event
@@ -867,14 +870,31 @@ pub fn handle_available_models_loaded(state: &mut AppState, models: Vec<Model>) 
     sorted_models.sort_by(|a, b| a.provider.cmp(&b.provider));
     state.available_models = sorted_models;
 
-    // Pre-select current model if available
-    if let Some(current) = &state.current_model
-        && let Some(idx) = state
+    // Pre-select current model if available and it's in the filtered list
+    let filtered = crate::services::model_switcher::filter_models(
+        &state.available_models,
+        state.model_switcher_mode,
+        &state.model_switcher_search,
+    );
+
+    if let Some(current) = &state.current_model {
+        // Check if current model is in the filtered list
+        if let Some(idx) = state
             .available_models
             .iter()
             .position(|m| m.id == current.id)
-    {
-        state.model_switcher_selected = idx;
+        {
+            if filtered.contains(&idx) {
+                state.model_switcher_selected = idx;
+            } else {
+                // Current model not in filter, select first filtered item
+                state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
+            }
+        } else {
+            state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
+        }
+    } else {
+        state.model_switcher_selected = filtered.first().copied().unwrap_or(0);
     }
 }
 
@@ -884,6 +904,17 @@ pub fn handle_model_switcher_select(state: &mut AppState, output_tx: &Sender<Out
         && !state.available_models.is_empty()
         && state.model_switcher_selected < state.available_models.len()
     {
+        // Verify the selected index is in the current filtered set
+        let filtered = crate::services::model_switcher::filter_models(
+            &state.available_models,
+            state.model_switcher_mode,
+            &state.model_switcher_search,
+        );
+        if !filtered.contains(&state.model_switcher_selected) {
+            // Selected model is not in the filtered list, ignore selection
+            return;
+        }
+
         let selected_model = state.available_models[state.model_switcher_selected].clone();
 
         // Don't switch if already on this model
@@ -893,14 +924,16 @@ pub fn handle_model_switcher_select(state: &mut AppState, output_tx: &Sender<Out
             .is_some_and(|m| m.id == selected_model.id)
         {
             state.show_model_switcher = false;
+            state.model_switcher_search.clear();
             return;
         }
 
         // Update current model
         state.current_model = Some(selected_model.clone());
 
-        // Close the switcher
+        // Close the switcher and clear search
         state.show_model_switcher = false;
+        state.model_switcher_search.clear();
 
         // Send request to switch model
         let _ = output_tx.try_send(OutputEvent::SwitchToModel(selected_model.clone()));
@@ -910,4 +943,6 @@ pub fn handle_model_switcher_select(state: &mut AppState, output_tx: &Sender<Out
 /// Handle model switcher cancel event
 pub fn handle_model_switcher_cancel(state: &mut AppState) {
     state.show_model_switcher = false;
+    // Clear search when closing
+    state.model_switcher_search.clear();
 }
