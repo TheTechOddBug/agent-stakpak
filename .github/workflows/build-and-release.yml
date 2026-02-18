@@ -53,11 +53,12 @@ jobs:
             target: x86_64-unknown-linux-musl
             artifact_name: stakpak-linux-x86_64
             features: --features jemalloc
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-musl
-            artifact_name: stakpak-linux-aarch64
-            features: --features jemalloc
-            docker: rust:1.91-alpine3.21
+          # TODO: re-enable once libsql SIGSEGV on aarch64-musl exit is resolved
+          # - os: ubuntu-22.04-arm
+          #   target: aarch64-unknown-linux-musl
+          #   artifact_name: stakpak-linux-aarch64
+          #   features: --features jemalloc
+          #   docker: rust:1.91-alpine3.21
           - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: stakpak-darwin-x86_64
@@ -159,7 +160,7 @@ jobs:
         with:
           files: |
             stakpak-linux-x86_64/stakpak-linux-x86_64.tar.gz
-            stakpak-linux-aarch64/stakpak-linux-aarch64.tar.gz
+            # stakpak-linux-aarch64/stakpak-linux-aarch64.tar.gz
             stakpak-darwin-x86_64/stakpak-darwin-x86_64.tar.gz
             stakpak-darwin-aarch64/stakpak-darwin-aarch64.tar.gz
             stakpak-windows-x86_64/stakpak-windows-x86_64.zip
