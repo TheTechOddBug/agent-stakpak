@@ -163,6 +163,7 @@ The Slack bot needs specific OAuth scopes. Without the read/history scopes, the 
 | Scope | Purpose | Required for |
 |-------|---------|-------------|
 | `chat:write` | Send messages to channels | Outbound (notifications) |
+| `reactions:read` | Read emoji reactions | Inbound |
 | `reactions:write` | Add emoji reactions (`:eyes:` receipt) | Outbound |
 | `channels:read` | See public channels the bot is in | Inbound |
 | `groups:read` | See private channels the bot is in | Inbound |
