@@ -127,6 +127,10 @@ jobs:
               echo "OK: jemalloc override verified"
             '
 
+      - name: Fix Docker cache permissions
+        if: matrix.docker
+        run: sudo chown -R $(id -u):$(id -g) ~/.cargo-docker
+
       - name: Build
         if: ${{ !matrix.docker }}
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
