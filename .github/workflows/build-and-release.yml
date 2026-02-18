@@ -114,9 +114,9 @@ jobs:
             -v /home/runner/.cargo-docker/registry:/usr/local/cargo/registry
             -v /home/runner/.cargo-docker/git:/usr/local/cargo/git
           run: |
-            apk add --no-cache gcc musl-dev
+            apk add --no-cache gcc musl-dev make
             cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
-            cargo test --target ${{ matrix.target }}
+            cargo test --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Build
         if: ${{ !matrix.docker }}
