@@ -205,9 +205,8 @@ async fn spawn_warden_container(
         // Named volumes (e.g. "stakpak-aqua-cache:/container/path") don't have a
         // host filesystem path — mount them unconditionally. Bind mounts are only
         // added when the host path actually exists.
-        let is_named_volume = !host_path.starts_with('/')
-            && !host_path.starts_with('.')
-            && !host_path.contains('/');
+        let is_named_volume =
+            !host_path.starts_with('/') && !host_path.starts_with('.') && !host_path.contains('/');
         if is_named_volume || Path::new(host_path).exists() {
             cmd.args(["--volume", &expanded]);
         }

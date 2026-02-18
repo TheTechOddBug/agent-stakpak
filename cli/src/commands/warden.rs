@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, warden::stakpak_agent_default_mounts};
 use crate::utils::plugins::{PluginConfig, get_plugin_path};
 use clap::Subcommand;
 use std::io::{BufRead, BufReader};
@@ -165,8 +165,6 @@ pub async fn get_warden_plugin_path() -> String {
 /// If `check_enabled` is true, profile volumes are only included when
 /// `warden.enabled` is true.
 pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
-    use crate::config::warden::stakpak_agent_default_mounts;
-
     let mut volumes_to_mount = Vec::new();
 
     // Add volumes from profile config
@@ -179,13 +177,8 @@ pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
     // Append every default mount that isn't already covered by the profile.
     // Dedup by the container-side path (the part after the first `:`).
     for default_vol in stakpak_agent_default_mounts() {
-        let container_path = default_vol
-            .split(':')
-            .nth(1)
-            .unwrap_or(&default_vol);
-        let already_mounted = volumes_to_mount
-            .iter()
-            .any(|v| v.contains(container_path));
+        let container_path = default_vol.split(':').nth(1).unwrap_or(&default_vol);
+        let already_mounted = volumes_to_mount.iter().any(|v| v.contains(container_path));
         if !already_mounted {
             volumes_to_mount.push(default_vol);
         }
@@ -513,7 +506,10 @@ mod tests {
         }));
         let vols = prepare_volumes(&config, false);
         let aqua_count = vols.iter().filter(|v| v.contains("aquaproj-aqua")).count();
-        assert_eq!(aqua_count, 1, "should keep user mount, not add a second: {vols:?}");
+        assert_eq!(
+            aqua_count, 1,
+            "should keep user mount, not add a second: {vols:?}"
+        );
         assert!(vols.contains(&custom), "user mount should be preserved");
     }
 
@@ -530,8 +526,14 @@ mod tests {
         if let Ok(home) = std::env::var("HOME") {
             let input = "~/data:/data:ro".to_string();
             let expanded = expand_volume_path(input);
-            assert!(expanded.starts_with(&home), "tilde not expanded: {expanded}");
-            assert!(!expanded.starts_with('~'), "tilde still present: {expanded}");
+            assert!(
+                expanded.starts_with(&home),
+                "tilde not expanded: {expanded}"
+            );
+            assert!(
+                !expanded.starts_with('~'),
+                "tilde still present: {expanded}"
+            );
         }
     }
 }
