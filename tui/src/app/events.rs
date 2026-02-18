@@ -145,6 +145,8 @@ pub enum InputEvent {
     AvailableModelsLoaded(Vec<Model>),
     ModelSwitcherSelect,
     ModelSwitcherCancel,
+    ModelSwitcherSearchInputChanged(char),
+    ModelSwitcherSearchBackspace,
 
     // Side panel events
     ToggleSidePanel,

@@ -211,6 +211,14 @@ pub enum ShortcutsPopupMode {
     Sessions,
 }
 
+/// Mode for the model switcher popup filter tabs
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ModelSwitcherMode {
+    #[default]
+    All, // Show all models grouped by provider
+    Reasoning, // Show only models with reasoning support
+}
+
 #[derive(Debug)]
 pub struct LoadingStateManager {
     active_operations: std::collections::HashSet<LoadingOperation>,
