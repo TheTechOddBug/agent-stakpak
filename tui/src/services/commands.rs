@@ -487,7 +487,7 @@ pub fn execute_command(command_id: CommandId, ctx: CommandContext) -> Result<(),
             if ctx.state.plan_mode_active {
                 crate::services::helper_block::push_styled_message(
                     ctx.state,
-                    " Already in plan mode. Use Ctrl+P to review the plan.",
+                    " Already in plan mode. Use ctrl+p to review the plan.",
                     ratatui::style::Color::Yellow,
                     "⚠ ",
                     ratatui::style::Color::Yellow,

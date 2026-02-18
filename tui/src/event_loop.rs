@@ -578,7 +578,7 @@ pub async fn run_tui(
                                    // Show system message
                                    crate::services::helper_block::push_styled_message(
                                        &mut state,
-                                       " Plan ready for review. Opening reviewer... (Ctrl+P to toggle)",
+                                       " Plan ready for review. Opening reviewer... (ctrl+p to toggle)",
                                        ratatui::style::Color::Cyan,
                                        ">> ",
                                        ratatui::style::Color::Cyan,
