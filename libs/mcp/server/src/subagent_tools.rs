@@ -482,8 +482,15 @@ NOTES:
 
         // If sandbox mode is enabled, wrap the command in warden
         if enable_sandbox {
-            // Use standard stakpak image (no special warden image needed with wrap)
-            let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+            use stakpak_shared::container::{
+                ensure_named_volumes_exist, expand_volume_path, is_named_volume,
+                stakpak_agent_default_mounts, stakpak_agent_image,
+            };
+
+            // Pre-create named volumes to prevent race conditions with parallel subagents
+            ensure_named_volumes_exist();
+
+            let stakpak_image = stakpak_agent_image();
 
             let mut warden_command = format!("{} warden wrap {}", current_exe, stakpak_image);
 
@@ -491,35 +498,13 @@ NOTES:
             let warden_prompt_path = format!("/tmp/{}", prompt_filename);
             warden_command.push_str(&format!(" -v {}:{}", prompt_file_path, warden_prompt_path));
 
-            // Add default sandbox volumes for read-only access
-            // Working directory (read-only)
-            warden_command.push_str(" -v ./:/agent:ro");
-            // Session data directory (read-write for subagent state)
-            warden_command.push_str(" -v ./.stakpak:/agent/.stakpak");
-
-            // Cloud credentials (read-only) - only mount if they exist
-            let cloud_volumes = [
-                ("~/.aws", "/home/agent/.aws:ro"),
-                ("~/.config/gcloud", "/home/agent/.config/gcloud:ro"),
-                ("~/.azure", "/home/agent/.azure:ro"),
-                ("~/.kube", "/home/agent/.kube:ro"),
-            ];
-
-            for (host_path, container_path) in cloud_volumes {
-                // Expand ~ to home directory
-                let expanded_path = if host_path.starts_with("~/") {
-                    if let Ok(home) = std::env::var("HOME") {
-                        host_path.replacen("~", &home, 1)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    host_path.to_string()
-                };
-
-                // Only add volume if the path exists
-                if Path::new(&expanded_path).exists() {
-                    warden_command.push_str(&format!(" -v {}:{}", expanded_path, container_path));
+            // Add default sandbox volumes (cloud creds, working dir, aqua cache, etc.)
+            for vol in stakpak_agent_default_mounts() {
+                let expanded = expand_volume_path(&vol);
+                let host_path = expanded.split(':').next().unwrap_or(&expanded);
+                // Named volumes are always mounted; bind mounts only if the host path exists
+                if is_named_volume(host_path) || Path::new(host_path).exists() {
+                    warden_command.push_str(&format!(" -v {}", expanded));
                 }
             }
 
