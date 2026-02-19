@@ -18,7 +18,8 @@ use crate::config::AppConfig;
 use crate::utils::agent_context::AgentContext;
 use crate::utils::check_update::get_latest_cli_version;
 use reqwest::header::HeaderMap;
-use stakpak_api::models::ApiStreamError;
+use stakpak_api::local::skills::{default_skill_directories, discover_skills};
+use stakpak_api::models::{ApiStreamError, Skill};
 use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, Model, models::ListRuleBook};
 
 use stakpak_mcp_server::EnabledToolsConfig;
@@ -999,7 +1000,7 @@ pub async fn run_interactive(
                         ));
                     }
                     OutputEvent::RequestRulebookUpdate(selected_uris) => {
-                        // Update the rulebooks list based on selected URIs
+                        // Update the selected remote rulebooks, then rebuild skill view.
                         if let Some(all_rulebooks) = &all_available_rulebooks {
                             let filtered_rulebooks: Vec<_> = all_rulebooks
                                 .iter()
@@ -1007,23 +1008,32 @@ pub async fn run_interactive(
                                 .cloned()
                                 .collect();
 
-                            // Update the rulebooks in agent context
+                            let mut merged_skills: Vec<Skill> =
+                                filtered_rulebooks.into_iter().map(Skill::from).collect();
+                            let skill_dirs = default_skill_directories();
+                            let local_skills = discover_skills(&skill_dirs);
+                            merged_skills.extend(local_skills);
+
                             if let Some(ref mut ctx) = agent_context {
-                                ctx.update_rulebooks(Some(filtered_rulebooks));
+                                ctx.update_skills(Some(merged_skills));
                             }
 
-                            // Set flag to update rulebooks on next message
+                            // Set flag to refresh injected context on next message
                             should_update_rulebooks_on_next_message = true;
                         }
                         continue;
                     }
                     OutputEvent::RequestCurrentRulebooks => {
-                        // Send currently active rulebook URIs to TUI
+                        // Send currently selected remote rulebook URIs to TUI.
+                        // Agent context now stores skills, so keep only remote stakpak:// entries.
                         if let Some(ref ctx) = agent_context
-                            && let Some(current_rulebooks) = &ctx.rulebooks
+                            && let Some(current_skills) = &ctx.skills
                         {
-                            let current_uris: Vec<String> =
-                                current_rulebooks.iter().map(|rb| rb.uri.clone()).collect();
+                            let current_uris: Vec<String> = current_skills
+                                .iter()
+                                .filter(|skill| skill.uri.starts_with("stakpak://"))
+                                .map(|skill| skill.uri.clone())
+                                .collect();
 
                             let _ = send_input_event(
                                 &input_tx,
@@ -1426,9 +1436,21 @@ pub async fn run_interactive(
                 }
             });
 
-            // Update config with new rulebooks via unified context
+            // Update context skills for the new profile (remote rulebooks + local skills).
             if let Some(ref mut ctx) = config.agent_context {
-                ctx.update_rulebooks(new_rulebooks);
+                let mut merged_skills: Vec<Skill> = new_rulebooks
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Skill::from)
+                    .collect();
+                let skill_dirs = default_skill_directories();
+                let local_skills = discover_skills(&skill_dirs);
+                merged_skills.extend(local_skills);
+                ctx.update_skills(if merged_skills.is_empty() {
+                    None
+                } else {
+                    Some(merged_skills)
+                });
             }
             config.allowed_tools = new_config.allowed_tools.clone();
             config.auto_approve = new_config.auto_approve.clone();

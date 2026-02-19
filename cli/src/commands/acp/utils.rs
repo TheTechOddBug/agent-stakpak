@@ -22,16 +22,17 @@ pub fn strip_tool_name(name: &str) -> &str {
     result
 }
 
-/// Convert XML tags to markdown headers using pattern matching
-/// Handles the 4 specific tags: scratchpad, todo, local_context, rulebooks
+/// Convert XML tags to markdown headers using pattern matching.
+/// Handles core context tags plus both legacy and current skill sections.
 pub fn convert_xml_tags_to_markdown(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Define the 4 specific tags we want to handle
     let tag_patterns = [
         ("<scratchpad>", "## **Scratchpad**\n"),
         ("<todo>", "### **Todo**\n"),
         ("<local_context>", "### **Local Context**\n"),
+        ("<available_skills>", "### **Available Skills**\n"),
+        // Legacy tag kept for backward compatibility with older checkpoints.
         ("<rulebooks>", "### **Rulebooks**\n"),
     ];
 
@@ -39,6 +40,7 @@ pub fn convert_xml_tags_to_markdown(text: &str) -> String {
         "</scratchpad>",
         "</todo>",
         "</local_context>",
+        "</available_skills>",
         "</rulebooks>",
     ];
 
@@ -99,6 +101,14 @@ mod tests {
     fn test_convert_xml_tags_to_markdown() {
         let input = "<scratchpad>\n<todo>\n- Task 1\n- Task 2\n</todo>\n</scratchpad>";
         let expected = "## **Scratchpad**\n\n### **Todo**\n\n- Task 1\n- Task 2\n\n";
+        let result = convert_xml_tags_to_markdown(input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_convert_available_skills_tag_to_markdown() {
+        let input = "<available_skills>\n- skill one\n</available_skills>";
+        let expected = "### **Available Skills**\n\n- skill one\n";
         let result = convert_xml_tags_to_markdown(input);
         assert_eq!(result, expected);
     }

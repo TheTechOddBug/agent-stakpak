@@ -1,7 +1,7 @@
 use crate::utils::agents_md::{AgentsMdInfo, format_agents_md_for_context};
 use crate::utils::apps_md::{AppsMdInfo, format_apps_md_for_context};
 use crate::utils::local_context::LocalContext;
-use stakpak_api::models::ListRuleBook;
+use stakpak_api::models::Skill;
 
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -9,7 +9,7 @@ pub struct AgentContext {
     /// does not refresh on subsequent injections (by design — avoids blocking
     /// filesystem walks on every message).
     pub local_context_formatted: Option<String>,
-    pub rulebooks: Option<Vec<ListRuleBook>>,
+    pub skills: Option<Vec<Skill>>,
     pub agents_md: Option<AgentsMdInfo>,
     pub apps_md: Option<AppsMdInfo>,
 }
@@ -17,7 +17,7 @@ pub struct AgentContext {
 impl AgentContext {
     pub async fn from_parts(
         local_context: Option<LocalContext>,
-        rulebooks: Option<Vec<ListRuleBook>>,
+        skills: Option<Vec<Skill>>,
         agents_md: Option<AgentsMdInfo>,
         apps_md: Option<AppsMdInfo>,
     ) -> Self {
@@ -29,14 +29,14 @@ impl AgentContext {
 
         Self {
             local_context_formatted,
-            rulebooks,
+            skills,
             agents_md,
             apps_md,
         }
     }
 
-    pub fn update_rulebooks(&mut self, rulebooks: Option<Vec<ListRuleBook>>) {
-        self.rulebooks = rulebooks;
+    pub fn update_skills(&mut self, skills: Option<Vec<Skill>>) {
+        self.skills = skills;
     }
 
     pub fn enrich_prompt(
@@ -58,11 +58,14 @@ impl AgentContext {
             );
         }
 
-        if let Some(ref rulebooks) = self.rulebooks
-            && !rulebooks.is_empty()
+        if let Some(ref skills) = self.skills
+            && !skills.is_empty()
         {
-            let rulebooks_text = format_rulebooks(rulebooks);
-            result = format!("{}\n<rulebooks>\n{}\n</rulebooks>", result, rulebooks_text);
+            let skills_text = format_skills(skills);
+            result = format!(
+                "{}\n<available_skills>\n{}\n</available_skills>",
+                result, skills_text
+            );
         }
 
         if is_first_message {
@@ -81,23 +84,12 @@ impl AgentContext {
     }
 }
 
-fn format_rulebooks(rulebooks: &[ListRuleBook]) -> String {
+fn format_skills(skills: &[Skill]) -> String {
     format!(
-        "# My Rule Books:\n\n{}",
-        rulebooks
+        "# Available Skills:\n\n{}",
+        skills
             .iter()
-            .map(|rulebook| {
-                let text = rulebook.to_text();
-                let mut lines = text.lines();
-                let mut result = String::new();
-                if let Some(first) = lines.next() {
-                    result.push_str(&format!("  - {}", first));
-                    for line in lines {
-                        result.push_str(&format!("\n    {}", line));
-                    }
-                }
-                result
-            })
+            .map(|skill| format!("  - {}", skill.to_metadata_text()))
             .collect::<Vec<String>>()
             .join("\n")
     )
@@ -122,27 +114,34 @@ mod tests {
         }
     }
 
-    fn make_rulebooks() -> Vec<ListRuleBook> {
-        vec![ListRuleBook {
-            id: "rb_test_001".to_string(),
-            uri: "stakpak://test/rulebook.md".to_string(),
-            description: "Test rulebook".to_string(),
-            visibility: stakpak_api::models::RuleBookVisibility::Public,
+    fn make_skills() -> Vec<Skill> {
+        vec![Skill {
+            name: "skill_test_001".to_string(),
+            uri: "stakpak://test/skill.md".to_string(),
+            description: "Test skill".to_string(),
+            source: stakpak_api::models::SkillSource::Remote {
+                provider: stakpak_api::models::RemoteProvider::Rulebook {
+                    visibility: stakpak_api::models::RuleBookVisibility::Public,
+                },
+            },
+            content: None,
             tags: vec!["test".to_string()],
-            created_at: None,
-            updated_at: None,
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: None,
         }]
     }
 
     fn make_context(
         local_context_formatted: Option<&str>,
-        rulebooks: Option<Vec<ListRuleBook>>,
+        skills: Option<Vec<Skill>>,
         agents_md: Option<AgentsMdInfo>,
         apps_md: Option<AppsMdInfo>,
     ) -> AgentContext {
         AgentContext {
             local_context_formatted: local_context_formatted.map(String::from),
-            rulebooks,
+            skills,
             agents_md,
             apps_md,
         }
@@ -152,7 +151,7 @@ mod tests {
     fn enrich_prompt_first_message_full_context() {
         let ctx = make_context(
             Some("# System Details\n\nMachine: test"),
-            Some(make_rulebooks()),
+            Some(make_skills()),
             Some(make_agents_md()),
             Some(make_apps_md()),
         );
@@ -162,8 +161,8 @@ mod tests {
         assert!(result.starts_with("Hello agent"));
         assert!(result.contains("<local_context>"));
         assert!(result.contains("Machine: test"));
-        assert!(result.contains("<rulebooks>"));
-        assert!(result.contains("Test rulebook"));
+        assert!(result.contains("<available_skills>"));
+        assert!(result.contains("Test skill"));
         assert!(result.contains("<agents_md>"));
         assert!(result.contains("<apps_md>"));
     }
@@ -172,7 +171,7 @@ mod tests {
     fn enrich_prompt_not_first_message_returns_unchanged() {
         let ctx = make_context(
             Some("# System Details"),
-            Some(make_rulebooks()),
+            Some(make_skills()),
             Some(make_agents_md()),
             Some(make_apps_md()),
         );
@@ -182,10 +181,10 @@ mod tests {
     }
 
     #[test]
-    fn enrich_prompt_force_context_injects_local_and_rulebooks_only() {
+    fn enrich_prompt_force_context_injects_local_and_skills_only() {
         let ctx = make_context(
             Some("# System Details\n\nMachine: test"),
-            Some(make_rulebooks()),
+            Some(make_skills()),
             Some(make_agents_md()),
             Some(make_apps_md()),
         );
@@ -193,7 +192,7 @@ mod tests {
         let result = ctx.enrich_prompt("Updated question", false, true);
 
         assert!(result.contains("<local_context>"));
-        assert!(result.contains("<rulebooks>"));
+        assert!(result.contains("<available_skills>"));
         assert!(!result.contains("<agents_md>"));
         assert!(!result.contains("<apps_md>"));
     }
@@ -206,18 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn enrich_prompt_skips_empty_rulebooks_block() {
+    fn enrich_prompt_skips_empty_skills_block() {
         let ctx = make_context(None, Some(vec![]), None, None);
         let result = ctx.enrich_prompt("Hello", true, false);
         assert_eq!(result, "Hello");
     }
 
     #[test]
-    fn update_rulebooks_replaces_rulebooks() {
+    fn update_skills_replaces_skills() {
         let mut ctx = make_context(None, None, None, None);
-        assert!(ctx.rulebooks.is_none());
+        assert!(ctx.skills.is_none());
 
-        ctx.update_rulebooks(Some(make_rulebooks()));
-        assert!(ctx.rulebooks.is_some());
+        ctx.update_skills(Some(make_skills()));
+        assert!(ctx.skills.is_some());
     }
 }

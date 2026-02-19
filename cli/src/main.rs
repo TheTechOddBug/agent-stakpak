@@ -22,6 +22,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use clap::Parser;
 use names::{self, Name};
 use rustls::crypto::CryptoProvider;
+use stakpak_api::local::skills::{default_skill_directories, discover_skills};
+use stakpak_api::models::Skill;
 use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider};
 use stakpak_mcp_server::EnabledToolsConfig;
 use std::{
@@ -397,8 +399,27 @@ async fn main() {
                 let _ = update_result;
                 let rulebooks = rulebooks_result;
 
+                let skills: Option<Vec<Skill>> = {
+                    let mut merged: Vec<Skill> = rulebooks
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .map(Skill::from)
+                        .collect();
+
+                    let skill_dirs = default_skill_directories();
+                    let local_skills = discover_skills(&skill_dirs);
+                    merged.extend(local_skills);
+
+                    if merged.is_empty() {
+                        None
+                    } else {
+                        Some(merged)
+                    }
+                };
+
                 let agent_context =
-                    AgentContext::from_parts(local_context, rulebooks, agents_md, apps_md).await;
+                    AgentContext::from_parts(local_context, skills, agents_md, apps_md).await;
 
                 let enable_subagents = !cli.disable_subagents;
 
