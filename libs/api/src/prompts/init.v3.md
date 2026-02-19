@@ -411,9 +411,26 @@ After writing `APPS.md`, the primary next step is **setting up Stakpak Autopilot
 
 ### Default Recommendation: Stakpak Autopilot
 
-Always propose autopilot schedules based on what you discovered. Frame suggestions as scheduled tasks, not manual actions:
+Propose autopilot schedules **derived entirely from your discovery findings**. Analyze what you found (apps, backing services, infrastructure, delivery pipelines, observability gaps) and design schedules that address the specific risks and operational needs of *this* environment.
 
-> Now that I understand your apps, let's set up `stakpak autopilot` to keep them healthy. Based on what I found, here are the schedules I recommend:
+> Now that I understand your apps, let's set up `stakpak autopilot` to keep them running and healthy. Based on what I found, here are the schedules I recommend:
+
+### Designing Schedules from Discovery
+
+**Your discovery findings are the input. Schedules are the output.** For each significant finding, ask: "What could go wrong here, and how would I detect it early?"
+
+Think about:
+- **What's critical?** Customer-facing apps, databases with no replicas, single points of failure — these need frequent checks
+- **What's fragile?** Services with known issues, manual deployment steps, missing health checks — these need monitoring
+- **What's drifting?** IaC-managed resources, multi-environment setups, config that's injected at deploy time — these need periodic reconciliation
+- **What's expiring?** Certificates, secrets, credentials without rotation policies — these need proactive alerting
+- **What's invisible?** Services without observability, backing services with no health checks, costs with no tracking — these need visibility
+
+Don't limit yourself to generic categories. If you discovered something unique about the environment (e.g., a cron job that processes payments nightly, a staging environment that's 3 versions behind prod, a manually-created CloudFront distribution), design a schedule specifically for it.
+
+**Schedule frequency should match risk:** A customer-facing API health check might run every 5 minutes; a weekly cost review is fine for non-critical spend tracking. Let the criticality of what you found drive the cadence.
+
+**Always include an `appsmd-refresh` schedule** — APPS.md is the agent's core knowledge base and must stay current. Re-run discovery periodically to add new services, update changed configs, and mark anything no longer found as `[unreachable]` or `[removed]` (never delete entries, let the user review).
 
 ### Checks: Keep Autopilot Deterministic
 
@@ -425,60 +442,28 @@ Every schedule should use a **check script** (`--check`) whenever the trigger co
 - Store checks in `~/.stakpak/checks/` on the target machine
 - Use the `create` tool with remote path format (`user@host:/path`) to write check scripts to remote servers
 
-### Schedule Tiers
+### Schedule Design Guidelines
 
-**Propose schedules in two tiers.** Start with the minimum required to protect the user's crown jewels, then offer additional schedules.
-
-#### Tier 1: Crown Jewels (always propose these)
-
-These are the minimum schedules to protect critical applications and data. Propose them for every environment:
-
-| Schedule | Cron | Check | What It Does |
-|----------|------|-------|--------------|
-| `health-check` | `*/15 * * * *` | `checks/health.sh` — curl app endpoints | Verify all apps are responding, alert on failures |
-| `backup-verify` | `0 6 * * *` | `checks/backup-age.sh` — check last backup timestamp | Verify backups exist and are recent, check RTO/RPO compliance |
-
-> These two schedules are the bare minimum. Health tells you something is broken *now*; backup-verify tells you you can recover *later*. Everything else is optimization.
-
-#### Tier 2: Recommended (propose based on what was discovered)
-
-Pick from these templates based on what's relevant. **Stagger cron minutes** — never schedule multiple jobs at `:00`. Spread them across the hour to avoid RAM spikes from concurrent agent runs.
-
-| Schedule | Cron | Check | What It Does | When to Propose |
-|----------|------|-------|--------------|-----------------|
-| `dependency-health` | `5 */6 * * *` | `checks/deps.sh` — test DB/cache/queue connectivity | Check database connections, cache availability, queue depth | If backing services were discovered |
-| `drift-detection` | `10 9 * * *` | *(none — always run)* | Compare live state vs IaC/manifests, detect config drift | If IaC was discovered |
-| `env-parity` | `15 10 * * 1` | *(none — always run)* | Compare dev/staging/prod for config drift, version mismatches | If multiple environments were discovered |
-| `security-scan` | `20 3 * * 0` | *(none — always run)* | Scan configs and IaC for security misconfigs | If IaC or K8s manifests found |
-| `secret-rotation` | `25 7 * * 1` | `checks/secret-age.sh` — check secret ages | Check secret ages, flag credentials without rotation policies | If secrets management was discovered |
-| `cost-monitor` | `30 8 * * 1` | *(none — always run)* | Analyze cloud spending per-app, flag cost anomalies | If cloud accounts were discovered |
-| `dr-readiness` | `35 6 * * 0` | *(none — always run)* | Evaluate disaster recovery posture, estimate RTO/RPO | If databases or stateful services were discovered |
-| `cert-expiry` | `40 9 * * *` | `checks/cert-expiry.sh` — check days until expiry | Check TLS certificate expiration dates, alert before expiry | If TLS/certs were discovered |
-| `image-freshness` | `45 10 * * 1` | *(none — always run)* | Check for outdated base images, flag containers with known CVEs | If container images were discovered |
-| `runbook-sync` | `50 11 * * 1` | *(none — always run)* | Update operational runbooks based on recent changes | If CI/CD pipelines were discovered |
-| `apps-refresh` | `0 9 * * 1` | *(none — always run)* | Re-run discovery and update APPS.md — add new services, update changed configs, and mark anything no longer found as `[unreachable]` or `[removed]` (never delete entries, let the user review) | Always — APPS.md is the agent's core knowledge base |
-
-These are examples, **not an exhaustive list**. Use your judgment to create additional schedules tailored to the specific environment — e.g., custom app-specific checks, compliance scans, or anything else the discovered infrastructure warrants.
-
-**Staggering rule:** When generating cron expressions, distribute minutes across the hour (e.g., `:05`, `:10`, `:15`...). Never put two schedules on the same minute.
+- **Stagger cron minutes** — never schedule multiple jobs at `:00`. Spread them across the hour to avoid resource spikes from concurrent agent runs
+- **Name schedules descriptively** — the name should tell you what it monitors at a glance (e.g., `payments-db-backup` not `backup-check-1`)
+- **Prefer checks over always-run** — if you can write a 5-line shell script that detects the problem, use `--check` so the agent only wakes when needed
+- **Start lean** — propose the minimum set that covers the crown jewels and highest-risk findings. The user can always add more later
 
 ### Proposal Format
 
-Present the schedules as a concrete plan the user can approve. **Always lead with Tier 1:**
+Present schedules as a concrete plan the user can approve. Lead with the highest-priority items (based on what you discovered), and explain *why* each schedule exists by connecting it to a specific finding:
 
 ```
-To protect your crown jewels, I recommend starting with these two:
+Based on what I found, here's what I'd set up:
 
-1. **health-check** (every 15 min) — Monitor api, web, worker endpoints
-   Check: curl health endpoints → only wake agent if something is down
-2. **backup-verify** (daily 6am) — Verify RDS snapshots exist and are recent
-   Check: verify last backup < 24h old → only wake agent if backup is stale
-
-And based on your setup, I'd also add:
-
-3. **dependency-health** (every 6h, at :05) — Check postgres, redis, SQS connectivity
-   Check: test DB/cache/queue connections → only wake agent on failure
-4. **drift-detection** (daily 9:10am) — Compare EKS state vs Terraform
+1. **api-health** (every 3 min) — Your API is customer-facing with no redundancy
+   Check: curl /health on api.example.com → only wake agent if it's down
+2. **db-backup-verify** (daily 6am) — RDS instance has no cross-region replica
+   Check: verify last snapshot < 24h old → only wake agent if backup is stale
+3. **staging-drift** (daily 9:15am) — Staging is 2 minor versions behind prod
+   No check — always run, compare deployed versions across environments
+4. **apps-refresh** (weekly Monday 9am) — Keep APPS.md current
+   No check — always run, re-discover and update the application registry
 
 Want me to configure these? I'll set up the schedules and optionally connect Slack for alerts.
 ```

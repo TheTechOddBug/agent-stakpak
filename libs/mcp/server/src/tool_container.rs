@@ -1,4 +1,4 @@
-use super::EnabledToolsConfig;
+use super::{EnabledToolsConfig, SubagentConfig};
 use rmcp::tool_handler;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, handler::server::tool::ToolRouter, model::*,
@@ -18,6 +18,7 @@ pub struct ToolContainer {
     pub enabled_tools: EnabledToolsConfig,
     pub tool_router: ToolRouter<Self>,
     pub skill_directories: Vec<PathBuf>,
+    pub subagent_config: SubagentConfig,
 }
 
 #[tool_router]
@@ -28,6 +29,7 @@ impl ToolContainer {
         task_manager: Arc<TaskManagerHandle>,
         tool_router: ToolRouter<Self>,
         skill_directories: Vec<PathBuf>,
+        subagent_config: SubagentConfig,
     ) -> Result<Self, String> {
         Ok(Self {
             client,
@@ -36,6 +38,7 @@ impl ToolContainer {
             enabled_tools,
             tool_router,
             skill_directories,
+            subagent_config,
         })
     }
 
