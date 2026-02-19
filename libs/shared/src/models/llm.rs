@@ -223,6 +223,27 @@ impl ProviderConfig {
         }
     }
 
+    /// Set the API endpoint for providers that support it.
+    ///
+    /// For `Custom`, `None` is ignored because custom providers require an endpoint.
+    /// For `Bedrock`, this is a no-op.
+    pub fn set_api_endpoint(&mut self, endpoint: Option<String>) {
+        match self {
+            ProviderConfig::OpenAI { api_endpoint, .. }
+            | ProviderConfig::Anthropic { api_endpoint, .. }
+            | ProviderConfig::Gemini { api_endpoint, .. }
+            | ProviderConfig::Stakpak { api_endpoint, .. } => {
+                *api_endpoint = endpoint;
+            }
+            ProviderConfig::Custom { api_endpoint, .. } => {
+                if let Some(custom_endpoint) = endpoint {
+                    *api_endpoint = custom_endpoint;
+                }
+            }
+            ProviderConfig::Bedrock { .. } => {}
+        }
+    }
+
     /// Get the access token (Anthropic only)
     pub fn access_token(&self) -> Option<&str> {
         match self {
@@ -828,6 +849,17 @@ mod tests {
         );
         assert_eq!(custom.provider_type(), "custom");
         assert_eq!(custom.api_endpoint(), Some("http://localhost:4000"));
+    }
+
+    #[test]
+    fn test_set_api_endpoint_updates_supported_providers() {
+        let mut openai = ProviderConfig::openai(Some("sk-openai".to_string()));
+        openai.set_api_endpoint(Some("https://proxy.example.com/v1".to_string()));
+        assert_eq!(openai.api_endpoint(), Some("https://proxy.example.com/v1"));
+
+        let mut bedrock = ProviderConfig::bedrock("us-east-1".to_string(), None);
+        bedrock.set_api_endpoint(Some("https://ignored.example.com".to_string()));
+        assert_eq!(bedrock.api_endpoint(), None);
     }
 
     #[test]

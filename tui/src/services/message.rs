@@ -17,6 +17,7 @@ use stakpak_shared::models::integrations::openai::FunctionCall;
 use stakpak_shared::models::integrations::openai::{
     ToolCall, ToolCallResult, ToolCallResultStatus, ToolCallStreamInfo,
 };
+use stakpak_shared::utils::strip_tool_name;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -1386,7 +1387,7 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
         }
         MessageContent::RenderPendingBorderBlock(tool_call, is_auto_approved) => {
             let full_command = extract_full_command_arguments(tool_call);
-            let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+            let tool_name = strip_tool_name(&tool_call.function.name);
             let rendered = if (tool_name == "str_replace" || tool_name == "create")
                 && !render_file_diff(tool_call, width).is_empty()
             {
@@ -1434,9 +1435,9 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
             lines.extend(convert_to_owned_lines(borrowed));
         }
         MessageContent::RenderCollapsedMessage(tool_call) => {
-            let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+            let tool_name = strip_tool_name(&tool_call.function.name);
             if (tool_name == "str_replace" || tool_name == "create")
-                && let Some(rendered) = render_file_diff_full(tool_call, width, Some(true))
+                && let Some(rendered) = render_file_diff_full(tool_call, width, Some(true), None)
                 && !rendered.is_empty()
             {
                 let borrowed = get_wrapped_styled_block_lines(&rendered, width);
@@ -1467,48 +1468,68 @@ fn render_single_message_internal(msg: &Message, width: usize) -> Vec<(Line<'sta
             lines.extend(convert_to_owned_lines(borrowed));
         }
         MessageContent::RenderFullContentMessage(tool_call_result) => {
-            let title = get_command_type_name(&tool_call_result.call);
-            let command_args = extract_truncated_command_arguments(&tool_call_result.call, None);
-            let result = &tool_call_result.result;
+            let tool_name =
+                stakpak_shared::utils::strip_tool_name(&tool_call_result.call.function.name);
 
-            let spacing_marker = Line::from(vec![Span::from("SPACING_MARKER")]);
-            lines.push((spacing_marker.clone(), Style::default()));
-
-            let dot_color = if tool_call_result.status == ToolCallResultStatus::Success {
-                Color::LightGreen
+            // For str_replace/create, use the diff view with proper line numbers
+            if (tool_name == "str_replace" || tool_name == "create")
+                && let Some(rendered) = render_file_diff_full(
+                    &tool_call_result.call,
+                    width,
+                    Some(true),
+                    Some(&tool_call_result.result),
+                )
+                && !rendered.is_empty()
+            {
+                let borrowed = get_wrapped_styled_block_lines(&rendered, width);
+                lines.extend(convert_to_owned_lines(borrowed));
             } else {
-                Color::Red
-            };
+                // For other tools, show the raw result
+                let title = get_command_type_name(&tool_call_result.call);
+                let command_args =
+                    extract_truncated_command_arguments(&tool_call_result.call, None);
+                let result = &tool_call_result.result;
 
-            let message_color = if tool_call_result.status == ToolCallResultStatus::Success {
-                AdaptiveColors::text()
-            } else {
-                Color::Red
-            };
+                let spacing_marker = Line::from(vec![Span::from("SPACING_MARKER")]);
+                lines.push((spacing_marker.clone(), Style::default()));
 
-            let header_lines = crate::services::bash_block::render_styled_header_with_dot_public(
-                &title,
-                &command_args,
-                Some(crate::services::bash_block::LinesColors {
-                    dot: dot_color,
-                    title: Color::White,
-                    command: AdaptiveColors::text(),
-                    message: message_color,
-                }),
-                Some(width),
-            );
-            for line in header_lines {
-                lines.push((convert_line_to_owned(line), Style::default()));
+                let dot_color = if tool_call_result.status == ToolCallResultStatus::Success {
+                    Color::LightGreen
+                } else {
+                    Color::Red
+                };
+
+                let message_color = if tool_call_result.status == ToolCallResultStatus::Success {
+                    AdaptiveColors::text()
+                } else {
+                    Color::Red
+                };
+
+                let header_lines =
+                    crate::services::bash_block::render_styled_header_with_dot_public(
+                        &title,
+                        &command_args,
+                        Some(crate::services::bash_block::LinesColors {
+                            dot: dot_color,
+                            title: Color::White,
+                            command: AdaptiveColors::text(),
+                            message: message_color,
+                        }),
+                        Some(width),
+                    );
+                for line in header_lines {
+                    lines.push((convert_line_to_owned(line), Style::default()));
+                }
+
+                lines.push((spacing_marker.clone(), Style::default()));
+
+                let content_lines = format_text_content(result, width);
+                for line in content_lines {
+                    lines.push((line, Style::default()));
+                }
+
+                lines.push((spacing_marker, Style::default()));
             }
-
-            lines.push((spacing_marker.clone(), Style::default()));
-
-            let content_lines = format_text_content(result, width);
-            for line in content_lines {
-                lines.push((line, Style::default()));
-            }
-
-            lines.push((spacing_marker, Style::default()));
         }
         MessageContent::RenderEscapedTextBlock(content) => {
             let rendered = format_text_content(content, width);
@@ -2059,7 +2080,7 @@ fn get_wrapped_message_lines_internal(
             }
             MessageContent::RenderPendingBorderBlock(tool_call, is_auto_approved) => {
                 let full_command = extract_full_command_arguments(tool_call);
-                let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+                let tool_name = strip_tool_name(&tool_call.function.name);
                 let rendered_lines = if (tool_name == "str_replace" || tool_name == "create")
                     && !render_file_diff(tool_call, width).is_empty()
                 {
@@ -2113,10 +2134,10 @@ fn get_wrapped_message_lines_internal(
             }
 
             MessageContent::RenderCollapsedMessage(tool_call) => {
-                let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+                let tool_name = strip_tool_name(&tool_call.function.name);
                 if (tool_name == "str_replace" || tool_name == "create")
                     && let Some(rendered_lines) =
-                        render_file_diff_full(tool_call, width, Some(true))
+                        render_file_diff_full(tool_call, width, Some(true), None)
                     && !rendered_lines.is_empty()
                 {
                     let borrowed_lines = get_wrapped_styled_block_lines(&rendered_lines, width);
@@ -2155,53 +2176,73 @@ fn get_wrapped_message_lines_internal(
                 all_lines.extend(owned_lines);
             }
             MessageContent::RenderFullContentMessage(tool_call_result) => {
-                // Full content view for popup - shows complete result without truncation
-                let title = crate::services::message::get_command_type_name(&tool_call_result.call);
-                let command_args =
-                    extract_truncated_command_arguments(&tool_call_result.call, None);
-                let result = &tool_call_result.result;
+                let tool_name =
+                    stakpak_shared::utils::strip_tool_name(&tool_call_result.call.function.name);
 
-                // Render header with dot
-                let spacing_marker = Line::from(vec![Span::from("SPACING_MARKER")]);
-                all_lines.push((spacing_marker.clone(), Style::default()));
-
-                let dot_color = if tool_call_result.status == ToolCallResultStatus::Success {
-                    Color::LightGreen
+                // For str_replace/create, use the diff view with proper line numbers
+                if (tool_name == "str_replace" || tool_name == "create")
+                    && let Some(rendered_lines) = render_file_diff_full(
+                        &tool_call_result.call,
+                        width,
+                        Some(true),
+                        Some(&tool_call_result.result),
+                    )
+                    && !rendered_lines.is_empty()
+                {
+                    let borrowed_lines = get_wrapped_styled_block_lines(&rendered_lines, width);
+                    let owned_lines = convert_to_owned_lines(borrowed_lines);
+                    all_lines.extend(owned_lines);
                 } else {
-                    Color::Red
-                };
+                    // Full content view for popup - shows complete result without truncation
+                    let title =
+                        crate::services::message::get_command_type_name(&tool_call_result.call);
+                    let command_args =
+                        extract_truncated_command_arguments(&tool_call_result.call, None);
+                    let result = &tool_call_result.result;
 
-                let message_color = if tool_call_result.status == ToolCallResultStatus::Success {
-                    crate::services::detect_term::AdaptiveColors::text()
-                } else {
-                    Color::Red
-                };
+                    // Render header with dot
+                    let spacing_marker = Line::from(vec![Span::from("SPACING_MARKER")]);
+                    all_lines.push((spacing_marker.clone(), Style::default()));
 
-                let header_lines =
-                    crate::services::bash_block::render_styled_header_with_dot_public(
-                        &title,
-                        &command_args,
-                        Some(crate::services::bash_block::LinesColors {
-                            dot: dot_color,
-                            title: Color::White,
-                            command: crate::services::detect_term::AdaptiveColors::text(),
-                            message: message_color,
-                        }),
-                        Some(width),
-                    );
-                for line in header_lines {
-                    all_lines.push((convert_line_to_owned(line), Style::default()));
+                    let dot_color = if tool_call_result.status == ToolCallResultStatus::Success {
+                        Color::LightGreen
+                    } else {
+                        Color::Red
+                    };
+
+                    let message_color = if tool_call_result.status == ToolCallResultStatus::Success
+                    {
+                        crate::services::detect_term::AdaptiveColors::text()
+                    } else {
+                        Color::Red
+                    };
+
+                    let header_lines =
+                        crate::services::bash_block::render_styled_header_with_dot_public(
+                            &title,
+                            &command_args,
+                            Some(crate::services::bash_block::LinesColors {
+                                dot: dot_color,
+                                title: Color::White,
+                                command: crate::services::detect_term::AdaptiveColors::text(),
+                                message: message_color,
+                            }),
+                            Some(width),
+                        );
+                    for line in header_lines {
+                        all_lines.push((convert_line_to_owned(line), Style::default()));
+                    }
+
+                    all_lines.push((spacing_marker.clone(), Style::default()));
+
+                    // Render full content
+                    let content_lines = format_text_content(result, width);
+                    for line in content_lines {
+                        all_lines.push((line, Style::default()));
+                    }
+
+                    all_lines.push((spacing_marker, Style::default()));
                 }
-
-                all_lines.push((spacing_marker.clone(), Style::default()));
-
-                // Render full content
-                let content_lines = format_text_content(result, width);
-                for line in content_lines {
-                    all_lines.push((line, Style::default()));
-                }
-
-                all_lines.push((spacing_marker, Style::default()));
             }
             MessageContent::RenderEscapedTextBlock(content) => {
                 let rendered_lines = format_text_content(content, width);
@@ -2349,7 +2390,7 @@ pub fn extract_truncated_command_arguments(tool_call: &ToolCall, sign: Option<St
     let arguments = serde_json::from_str::<Value>(&tool_call.function.arguments);
 
     // For subagent tasks, show description + tools summary instead of raw args
-    let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+    let tool_name = strip_tool_name(&tool_call.function.name);
     if tool_name == "dynamic_subagent_task"
         && let Ok(ref args) = arguments
     {
@@ -2645,7 +2686,7 @@ pub fn extract_command_purpose(command: &str, outside_title: &str) -> String {
 
 // Helper function to get command name for the outside title
 pub fn get_command_type_name(tool_call: &ToolCall) -> String {
-    match crate::utils::strip_tool_name(&tool_call.function.name) {
+    match strip_tool_name(&tool_call.function.name) {
         "create_file" => "Create file".to_string(),
         "create" => "Create".to_string(),
         "edit_file" => "Edit file".to_string(),
@@ -2675,7 +2716,7 @@ pub fn get_command_type_name(tool_call: &ToolCall) -> String {
         "ask_user" => "Ask User".to_string(),
         _ => {
             // Convert function name to title case
-            crate::utils::strip_tool_name(&tool_call.function.name)
+            strip_tool_name(&tool_call.function.name)
                 .replace("_", " ")
                 .split_whitespace()
                 .map(|word| {

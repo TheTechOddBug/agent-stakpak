@@ -13,7 +13,7 @@ pub async fn stop_autopilot() -> Result<(), String> {
         .db_path()
         .parent()
         .unwrap_or(Path::new("."))
-        .join("watch.pid");
+        .join("autopilot.pid");
 
     // Read PID from file
     let pid_str = std::fs::read_to_string(&pid_file).map_err(|_| {

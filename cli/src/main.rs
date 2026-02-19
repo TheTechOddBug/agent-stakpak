@@ -3,9 +3,27 @@
 // delimiters on the same strings.
 #![allow(clippy::string_slice)]
 
+// On Linux musl, the default allocator aggressively munmap's freed pages back to the
+// kernel. This causes use-after-free SIGSEGV in libsql's sqlite3Close() when concurrent
+// threads race between Database::drop() and page reclamation. jemalloc retains freed
+// pages in its arena, preventing this class of crash.
+//
+// IMPORTANT: tikv-jemallocator must be built with `unprefixed_malloc_on_supported_platforms`
+// so jemalloc provides the actual malloc/free/calloc/realloc symbols. Without this feature,
+// jemalloc uses prefixed names (_rjem_je_malloc) and only handles Rust allocations via
+// #[global_allocator]. SQLite's embedded C code (compiled via libsql-ffi) calls the
+// system malloc() directly — which on musl is the aggressive allocator that caused the crash.
+//
+// Gated to Linux only — this fix targets musl; macOS/Windows don't need allocator overrides.
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use clap::Parser;
 use names::{self, Name};
 use rustls::crypto::CryptoProvider;
+use stakpak_api::local::skills::{default_skill_directories, discover_skills};
+use stakpak_api::models::Skill;
 use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider};
 use stakpak_mcp_server::EnabledToolsConfig;
 use std::{
@@ -93,6 +111,22 @@ struct Cli {
     /// Enable study mode to use the agent as a study assistant
     #[arg(long = "study-mode", default_value_t = false)]
     study_mode: bool,
+
+    /// Enter plan mode — research and draft a plan before executing
+    #[arg(long = "plan", default_value_t = false)]
+    plan: bool,
+
+    /// Auto-approve the plan when status becomes 'reviewing' (async mode)
+    #[arg(long = "plan-approved", default_value_t = false)]
+    plan_approved: bool,
+
+    /// Read feedback from a file and inject as plan feedback (async mode)
+    #[arg(long = "plan-feedback")]
+    plan_feedback: Option<String>,
+
+    /// Archive any existing plan and start fresh (async mode, requires --plan)
+    #[arg(long = "plan-new", default_value_t = false)]
+    plan_new: bool,
 
     /// Allow indexing of large projects (more than 500 supported files)
     #[arg(long = "index-big-project", default_value_t = false)]
@@ -365,6 +399,24 @@ async fn main() {
                 let rulebooks = rulebooks_result;
 
                 let enable_subagents = !cli.disable_subagents;
+                let skills: Option<Vec<Skill>> = {
+                    let mut merged: Vec<Skill> = rulebooks
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .map(Skill::from)
+                        .collect();
+
+                    let skill_dirs = default_skill_directories();
+                    let local_skills = discover_skills(&skill_dirs);
+                    merged.extend(local_skills);
+
+                    if merged.is_empty() {
+                        None
+                    } else {
+                        Some(merged)
+                    }
+                };
 
                 // match get_or_build_local_code_index(&config, None, cli.index_big_project)
                 //     .await
@@ -460,8 +512,8 @@ async fn main() {
                                 local_context,
                                 redact_secrets: !cli.disable_secret_redaction,
                                 privacy_mode: cli.privacy_mode,
-                                rulebooks,
                                 enable_subagents,
+                                skills,
                                 max_steps,
                                 output_format: cli.output_format,
                                 enable_mtls: !cli.disable_mcp_mtls,
@@ -473,6 +525,10 @@ async fn main() {
                                 model: default_model.clone(),
                                 agents_md: agents_md.clone(),
                                 apps_md: apps_md.clone(),
+                                plan_mode: cli.plan,
+                                plan_approved: cli.plan_approved,
+                                plan_feedback: cli.plan_feedback.clone(),
+                                plan_new: cli.plan_new,
                                 pause_on_approval: cli.pause_on_approval,
                                 resume_input: if cli.approve.is_some()
                                     || cli.reject.is_some()
@@ -522,13 +578,15 @@ async fn main() {
                                 checkpoint_id,
                                 session_id,
                                 local_context,
+                                rulebooks,
                                 redact_secrets: !cli.disable_secret_redaction,
                                 privacy_mode: cli.privacy_mode,
-                                rulebooks,
                                 enable_subagents,
+                                skills,
                                 enable_mtls: !cli.disable_mcp_mtls,
                                 is_git_repo: gitignore::is_git_repo(),
                                 study_mode: cli.study_mode,
+                                plan_mode: cli.plan,
                                 system_prompt,
                                 allowed_tools,
                                 auto_approve,
@@ -664,6 +722,58 @@ mod tests {
                     assert!(args.foreground);
                 }
                 _ => panic!("Expected up command"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_profile_flag_on_up() {
+        let parsed = Cli::try_parse_from(["stakpak", "up", "--profile", "staging"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cli_accepts_root_profile_with_up() {
+        let parsed = Cli::try_parse_from(["stakpak", "--profile", "staging", "up"]);
+        assert!(parsed.is_ok());
+
+        if let Ok(cli) = parsed {
+            assert_eq!(cli.profile.as_deref(), Some("staging"));
+            match cli.command {
+                Some(Commands::Up { .. }) => {}
+                _ => panic!("Expected up command"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_rejects_profile_flag_on_autopilot_status() {
+        let parsed =
+            Cli::try_parse_from(["stakpak", "autopilot", "status", "--profile", "staging"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cli_parses_auth_login_endpoint_flag() {
+        let parsed = Cli::try_parse_from([
+            "stakpak",
+            "auth",
+            "login",
+            "--provider",
+            "stakpak",
+            "--api-key",
+            "test-key",
+            "--endpoint",
+            "https://self-hosted.example.com",
+        ]);
+        assert!(parsed.is_ok());
+
+        if let Ok(cli) = parsed {
+            match cli.command {
+                Some(Commands::Auth(commands::AuthCommands::Login { endpoint, .. })) => {
+                    assert_eq!(endpoint.as_deref(), Some("https://self-hosted.example.com"));
+                }
+                _ => panic!("Expected auth login command"),
             }
         }
     }

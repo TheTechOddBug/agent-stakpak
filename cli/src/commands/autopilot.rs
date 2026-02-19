@@ -145,10 +145,9 @@ pub enum AutopilotScheduleCommands {
         #[arg(long, default_value_t = ScheduleTriggerOn::Failure)]
         trigger_on: ScheduleTriggerOn,
 
-        /// Working directory for this schedule
-        #[arg(long)]
-        workdir: Option<String>,
-
+        // /// Working directory for this schedule
+        // #[arg(long)]
+        // workdir: Option<String>,
         /// Max agent steps
         #[arg(long, default_value_t = 50)]
         max_steps: u32,
@@ -160,6 +159,10 @@ pub enum AutopilotScheduleCommands {
         /// Require approval before acting
         #[arg(long, default_value_t = false)]
         pause_on_approval: bool,
+
+        /// Run agent tool calls inside a sandboxed warden container
+        #[arg(long, default_value_t = false)]
+        sandbox: bool,
 
         /// Enable immediately
         #[arg(long, default_value_t = true)]
@@ -216,7 +219,7 @@ pub enum AutopilotChannelCommands {
 
     /// Add a channel
     #[command(
-        after_long_help = "HOW TO GET TOKENS:\n\n  Slack (requires both --bot-token and --app-token):\n    1. Create app at https://api.slack.com/apps\n    2. Enable Socket Mode → generate app-level token (xapp-...) with connections:write scope\n    3. OAuth & Permissions → add scopes: app_mentions:read, chat:write, im:history, im:read, im:write\n    4. Event Subscriptions → subscribe to: app_mention, message.im\n    5. Install to Workspace → copy Bot User OAuth Token (xoxb-...)\n\n  Telegram:\n    1. Message @BotFather on Telegram\n    2. Send /newbot → choose name and username (must end in 'bot')\n    3. Copy the bot token (format: 123456789:ABCdef...)\n\n  Discord:\n    1. Create app at https://discord.com/developers/applications\n    2. Bot tab → copy the bot token\n    3. OAuth2 → enable bot scope and required permissions\n\n  Optional default notification target:\n    --target sets [notifications].channel/chat_id for watch alerts\n    Example: --target \"#engineering\" (Slack)\n"
+        after_long_help = "HOW TO GET TOKENS:\n\n  Slack (requires both --bot-token and --app-token):\n    1. Create app at https://api.slack.com/apps\n    2. Enable Socket Mode → generate app-level token (xapp-...) with connections:write scope\n    3. OAuth & Permissions → add Bot Token Scopes:\n       app_mentions:read, channels:history, channels:read, chat:write,\n       groups:history, groups:read, im:history, im:read,\n       mpim:history, mpim:read, reactions:read, reactions:write\n    4. Event Subscriptions → subscribe to bot events:\n       message.channels, message.groups, message.im, app_mention\n    5. Install to Workspace → copy Bot User OAuth Token (xoxb-...)\n\n  Telegram:\n    1. Message @BotFather on Telegram\n    2. Send /newbot → choose name and username (must end in 'bot')\n    3. Copy the bot token (format: 123456789:ABCdef...)\n\n  Discord:\n    1. Create app at https://discord.com/developers/applications\n    2. Bot tab → copy the bot token\n    3. OAuth2 → enable bot scope and required permissions\n\n  Optional default notification target:\n    --target sets [notifications].channel/chat_id for watch alerts\n    Example: --target \"#engineering\" (Slack)\n"
     )]
     Add {
         /// Channel type (slack, telegram, discord)
@@ -351,14 +354,16 @@ struct AutopilotScheduleConfig {
     check: Option<String>,
     #[serde(default)]
     trigger_on: ScheduleTriggerOn,
-    #[serde(default)]
-    workdir: Option<String>,
+    // #[serde(default)]
+    // workdir: Option<String>,
     #[serde(default = "default_schedule_max_steps")]
     max_steps: u32,
     #[serde(default)]
     channel: Option<String>,
     #[serde(default)]
     pause_on_approval: bool,
+    #[serde(default)]
+    sandbox: bool,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -880,14 +885,8 @@ async fn start_foreground_runtime(
             .try_init();
     }
 
-    // --- 1. Schedule runtime ---
-    let schedule_task = tokio::spawn(async {
-        if let Err(error) = crate::commands::watch::commands::run_scheduler().await {
-            eprintln!("Schedule runtime exited: {}", error);
-        }
-    });
-
-    // --- 2. Server runtime ---
+    // --- 1. Server runtime (initialize before scheduler to avoid sqlite3Close/sqlite3_open
+    //     race on libsql's global state when run_scheduler exits early) ---
     let bind = options.bind.clone();
     let (auth_config, generated_auth_token) = if options.no_auth {
         (stakpak_server::AuthConfig::disabled(), None)
@@ -986,12 +985,16 @@ async fn start_foreground_runtime(
     };
 
     let mcp_init_config = crate::commands::agent::run::mcp_init::McpInitConfig {
-        redact_secrets: true,
-        privacy_mode: false,
+        redact_secrets: true, // applied in proxy layer
+        privacy_mode: false,  // applied in proxy layer
         enabled_tools: stakpak_mcp_server::EnabledToolsConfig { slack: false },
         enable_mtls: true,
         enable_subagents: true,
         allowed_tools,
+        subagent_config: stakpak_mcp_server::SubagentConfig {
+            profile_name: Some(config.profile_name.clone()),
+            config_path: Some(config.config_path.clone()),
+        },
     };
 
     let mcp_init_result = crate::commands::agent::run::mcp_init::initialize_mcp_server_and_tools(
@@ -1036,8 +1039,21 @@ async fn start_foreground_runtime(
         Some(mcp_init_result.proxy_shutdown_tx),
     );
 
-    // --- 3. Gateway runtime ---
-    let config_path = AutopilotConfigFile::path();
+    // --- 1b. Sandbox configuration (warden + container image) ---
+    let warden_path = crate::commands::warden::get_warden_plugin_path().await;
+    let stakpak_image = crate::commands::warden::stakpak_agent_image();
+    let volumes = crate::commands::warden::prepare_volumes(config, false);
+    // Pre-create named volumes to prevent race conditions when parallel sandboxes start
+    stakpak_shared::container::ensure_named_volumes_exist();
+    let sandbox_config = stakpak_server::SandboxConfig {
+        warden_path,
+        image: stakpak_image.clone(),
+        volumes,
+    };
+    tracing::info!(image = %stakpak_image, warden = %sandbox_config.warden_path, "Sandbox config initialized");
+    let app_state = app_state.with_sandbox(sandbox_config);
+
+    // --- 2. Loopback connection for schedule + gateway runtimes ---
     let loopback_url = loopback_server_url(listener_addr);
     let loopback_token = if options.no_auth {
         String::new()
@@ -1045,9 +1061,12 @@ async fn start_foreground_runtime(
         generated_auth_token.clone().unwrap_or_default()
     };
 
+    // --- 3. Gateway runtime ---
+    let config_path = AutopilotConfigFile::path();
+
     let gateway_cli = stakpak_gateway::GatewayCliFlags {
-        url: Some(loopback_url),
-        token: Some(loopback_token),
+        url: Some(loopback_url.clone()),
+        token: Some(loopback_token.clone()),
         ..Default::default()
     };
 
@@ -1100,6 +1119,10 @@ async fn start_foreground_runtime(
 
     let shutdown_state = app_state.clone();
     let shutdown_refresh_tx = refresh_shutdown_tx.clone();
+    let server_model_id = app_state
+        .default_model
+        .as_ref()
+        .map(|m| format!("{}/{}", m.provider, m.id));
 
     let base_app = stakpak_server::router(app_state, auth_config);
     let app = if let Some(gateway_runtime) = gateway_runtime.as_ref() {
@@ -1120,6 +1143,19 @@ async fn start_foreground_runtime(
         None
     };
     let gateway_cancel_for_shutdown = gateway_cancel.clone();
+
+    // --- 4. Schedule runtime (spawned AFTER all SQLite initialization to avoid
+    //     sqlite3Close/sqlite3_open race in libsql on musl) ---
+    let schedule_server = crate::commands::watch::AgentServerConnection {
+        url: loopback_url,
+        token: loopback_token,
+        model: server_model_id,
+    };
+    let schedule_task = tokio::spawn(async move {
+        if let Err(error) = crate::commands::watch::commands::run_scheduler(schedule_server).await {
+            eprintln!("Schedule runtime exited: {}", error);
+        }
+    });
 
     // --- Print status ---
     println!("Autopilot running in foreground. Press Ctrl+C to stop.");
@@ -1315,7 +1351,7 @@ async fn stop_autopilot() -> Result<(), String> {
                     .db_path()
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
-                    .join("watch.pid");
+                    .join("autopilot.pid");
                 let _ = std::fs::remove_file(&pid_file);
             }
         }
@@ -1399,10 +1435,11 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
             prompt,
             check,
             trigger_on,
-            workdir,
+            // workdir,
             max_steps,
             channel,
             pause_on_approval,
+            sandbox,
             enabled,
         } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
@@ -1412,36 +1449,45 @@ async fn run_schedule_command(command: AutopilotScheduleCommands) -> Result<(), 
                 prompt,
                 check,
                 trigger_on,
-                workdir,
+                // workdir,
                 max_steps,
                 channel,
                 pause_on_approval,
+                sandbox,
                 enabled,
             };
             add_schedule_in_config(&mut config, schedule)?;
             config.save()?;
-            println!("✓ Schedule '{}' added", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "added", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Remove { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             remove_schedule_in_config(&mut config, &name)?;
             config.save()?;
-            println!("✓ Schedule '{}' removed", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "removed", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Enable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, true)?;
             config.save()?;
-            println!("✓ Schedule '{}' enabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "enabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Disable { name } => {
             let mut config = AutopilotConfigFile::load_or_default_async().await?;
             set_schedule_enabled_in_config(&mut config, &name, false)?;
             config.save()?;
-            println!("✓ Schedule '{}' disabled", name);
+
+            let signaled = signal_scheduler_reload().await;
+            print_schedule_mutation_feedback(&name, "disabled", signaled);
             Ok(())
         }
         AutopilotScheduleCommands::Trigger { name, dry_run } => {
@@ -1752,6 +1798,13 @@ fn validate_schedule(schedule: &AutopilotScheduleConfig) -> Result<(), String> {
         return Err("Schedule name cannot be empty".to_string());
     }
 
+    if schedule.name.trim() == crate::commands::watch::RELOAD_SENTINEL {
+        return Err(format!(
+            "Schedule name '{}' is reserved",
+            crate::commands::watch::RELOAD_SENTINEL
+        ));
+    }
+
     Cron::from_str(&schedule.cron)
         .map_err(|e| format!("Invalid cron expression '{}': {}", schedule.cron, e))?;
 
@@ -1798,6 +1851,46 @@ fn set_schedule_enabled_in_config(
 
     schedule.enabled = enabled;
     Ok(())
+}
+
+fn print_schedule_mutation_feedback(name: &str, action: &str, signaled: bool) {
+    if is_autopilot_running().is_some() {
+        if signaled {
+            println!("✓ Schedule '{}' {} (takes effect within ~1s)", name, action);
+        } else {
+            println!("✓ Schedule '{}' {} (takes effect within ~5s)", name, action);
+        }
+    } else {
+        println!(
+            "✓ Schedule '{}' {} (takes effect when autopilot starts)",
+            name, action
+        );
+    }
+}
+
+async fn signal_scheduler_reload() -> bool {
+    let db_path = match autopilot_db_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    let db = match crate::commands::watch::ScheduleDb::new(&db_path).await {
+        Ok(db) => db,
+        Err(_) => return false,
+    };
+
+    db.request_config_reload().await.is_ok()
+}
+
+fn autopilot_db_path() -> Result<String, String> {
+    let config = crate::commands::watch::ScheduleConfig::load_default()
+        .map_err(|error| format!("Failed to load watch config: {}", error))?;
+    let db_path = config.db_path();
+
+    db_path
+        .to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| "Invalid db path".to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -2623,7 +2716,7 @@ fn is_autopilot_running() -> Option<u32> {
         .db_path()
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join("watch.pid");
+        .join("autopilot.pid");
     let pid_str = std::fs::read_to_string(&pid_file).ok()?;
     let pid: u32 = pid_str.trim().parse().ok()?;
     if crate::commands::watch::is_process_running(pid) {
@@ -2757,7 +2850,7 @@ fn install_systemd_service(config: &AppConfig) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
     let mut exec_parts = vec![binary.display().to_string()];
-    if config.profile_name != "default" {
+    if !config.profile_name.is_empty() {
         exec_parts.push("--profile".to_string());
         exec_parts.push(config.profile_name.clone());
     }
@@ -2839,7 +2932,7 @@ fn install_launchd_service(config: &AppConfig) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
     let mut args = Vec::new();
-    if config.profile_name != "default" {
+    if !config.profile_name.is_empty() {
         args.push("<string>--profile</string>".to_string());
         args.push(format!(
             "<string>{}</string>",
@@ -3036,10 +3129,11 @@ mod tests {
             prompt: "Check infra".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
+            sandbox: false,
             enabled: true,
         }
     }
@@ -3084,6 +3178,17 @@ mod tests {
 
         let result = add_schedule_in_config(&mut config, schedule);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schedule_reserved_name_rejected() {
+        let mut config = AutopilotConfigFile::default();
+        let schedule = sample_schedule(crate::commands::watch::RELOAD_SENTINEL);
+
+        let result = add_schedule_in_config(&mut config, schedule);
+        assert!(result.is_err());
+        let message = result.expect_err("reserved schedule name should be rejected");
+        assert!(message.contains("reserved"));
     }
 
     #[test]
@@ -3379,10 +3484,11 @@ app_token = "xapp-test"
             prompt: "hello".to_string(),
             check: None,
             trigger_on: ScheduleTriggerOn::Failure,
-            workdir: None,
+            // workdir: None,
             max_steps: 50,
             channel: None,
             pause_on_approval: false,
+            sandbox: false,
             enabled: true,
         };
         let result = add_schedule_in_config(&mut config, schedule);

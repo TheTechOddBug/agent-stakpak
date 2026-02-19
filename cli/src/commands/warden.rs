@@ -1,8 +1,11 @@
 use crate::config::AppConfig;
 use crate::utils::plugins::{PluginConfig, get_plugin_path};
 use clap::Subcommand;
+// Re-export container constants so existing callers (autopilot.rs) don't need to change imports.
+pub use stakpak_shared::container::{
+    expand_volume_path, stakpak_agent_default_mounts, stakpak_agent_image,
+};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -76,10 +79,13 @@ impl WardenCommands {
                     cmd.args(["--env", &env_var]);
                 }
 
+                // Pre-create named volumes to prevent race conditions
+                stakpak_shared::container::ensure_named_volumes_exist();
+
                 // Prepare volumes from config first, then add user-specified volumes
                 // User volumes come last to allow overrides
                 for vol in prepare_volumes(&config, false) {
-                    let expanded_vol = expand_volume_path(vol);
+                    let expanded_vol = expand_volume_path(&vol);
                     cmd.args(["--volume", &expanded_vol]);
                 }
 
@@ -138,7 +144,7 @@ impl WardenCommands {
     }
 }
 
-async fn get_warden_plugin_path() -> String {
+pub async fn get_warden_plugin_path() -> String {
     let warden_config = PluginConfig {
         name: "warden".to_string(),
         base_url: "https://warden-cli-releases.s3.amazonaws.com/".to_string(),
@@ -154,10 +160,13 @@ async fn get_warden_plugin_path() -> String {
     get_plugin_path(warden_config).await
 }
 
-/// Helper function to prepare volumes for warden container
-/// Collects volumes from config and always appends stakpak config if it exists and isn't already mounted
-/// If check_enabled is true, only adds volumes when warden is enabled in config
-fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
+/// Helper function to prepare volumes for warden container.
+///
+/// Collects volumes from the profile config, then ensures every entry from
+/// [`stakpak_agent_default_mounts`] is present (deduped by container-side path).
+/// If `check_enabled` is true, profile volumes are only included when
+/// `warden.enabled` is true.
+pub fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
     let mut volumes_to_mount = Vec::new();
 
     // Add volumes from profile config
@@ -167,62 +176,17 @@ fn prepare_volumes(config: &AppConfig, check_enabled: bool) -> Vec<String> {
         volumes_to_mount.extend(warden_config.volumes.clone());
     }
 
-    // Always append stakpak config and auth files if they exist and not already in the list
-    if let Ok(home_dir) = std::env::var("HOME") {
-        let stakpak_dir = Path::new(&home_dir).join(".stakpak");
-
-        // Mount config.toml if it exists
-        let config_path = stakpak_dir.join("config.toml");
-        if config_path.exists() {
-            let config_path_str = config_path.to_string_lossy();
-            let stakpak_config_mount =
-                format!("{}:/home/agent/.stakpak/config.toml:ro", config_path_str);
-
-            // Check if stakpak config is already in the volume list
-            let config_already_mounted = volumes_to_mount.iter().any(|v| {
-                v.contains("/.stakpak/config.toml")
-                    || v.ends_with(":/home/agent/.stakpak/config.toml:ro")
-                    || v.ends_with(":/home/agent/.stakpak/config.toml")
-            });
-
-            if !config_already_mounted {
-                volumes_to_mount.push(stakpak_config_mount);
-            }
-        }
-
-        // Mount auth.toml if it exists (contains provider credentials)
-        let auth_path = stakpak_dir.join("auth.toml");
-        if auth_path.exists() {
-            let auth_path_str = auth_path.to_string_lossy();
-            let stakpak_auth_mount = format!("{}:/home/agent/.stakpak/auth.toml:ro", auth_path_str);
-
-            // Check if auth.toml is already in the volume list
-            let auth_already_mounted = volumes_to_mount.iter().any(|v| {
-                v.contains("/.stakpak/auth.toml")
-                    || v.ends_with(":/home/agent/.stakpak/auth.toml:ro")
-                    || v.ends_with(":/home/agent/.stakpak/auth.toml")
-            });
-
-            if !auth_already_mounted {
-                volumes_to_mount.push(stakpak_auth_mount);
-            }
+    // Append every default mount that isn't already covered by the profile.
+    // Dedup by the container-side path (the part after the first `:`).
+    for default_vol in stakpak_agent_default_mounts() {
+        let container_path = default_vol.split(':').nth(1).unwrap_or(&default_vol);
+        let already_mounted = volumes_to_mount.iter().any(|v| v.contains(container_path));
+        if !already_mounted {
+            volumes_to_mount.push(default_vol);
         }
     }
 
     volumes_to_mount
-}
-
-/// Helper function to expand tilde (~) in volume paths to home directory
-fn expand_volume_path(volume: String) -> String {
-    if volume.starts_with("~/") || volume.starts_with("~:") {
-        if let Ok(home_dir) = std::env::var("HOME") {
-            volume.replacen("~", &home_dir, 1)
-        } else {
-            volume
-        }
-    } else {
-        volume
-    }
 }
 
 /// Execute warden command with proper TTY handling and streaming
@@ -325,7 +289,7 @@ pub async fn run_default_warden(
     cmd.arg("wrap");
 
     // Use standard stakpak image with current CLI version (no special warden image needed)
-    let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+    let stakpak_image = stakpak_agent_image();
     cmd.arg(&stakpak_image);
 
     // Enable TTY by default for convenience command
@@ -333,7 +297,7 @@ pub async fn run_default_warden(
 
     // Prepare and mount volumes
     for volume in prepare_volumes(&config, true) {
-        let expanded_volume = expand_volume_path(volume);
+        let expanded_volume = expand_volume_path(&volume);
         cmd.args(["--volume", &expanded_volume]);
     }
 
@@ -364,7 +328,7 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
     cmd.arg("wrap");
 
     // Use standard stakpak image with current CLI version (no special warden image needed)
-    let stakpak_image = format!("ghcr.io/stakpak/agent:v{}", env!("CARGO_PKG_VERSION"));
+    let stakpak_image = stakpak_agent_image();
     cmd.arg(&stakpak_image);
 
     // Determine if we need TTY (interactive mode) based on CLI args.
@@ -381,16 +345,16 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
 
     // Prepare and mount volumes (don't check enabled flag for this function)
     for volume in prepare_volumes(&config, false) {
-        let expanded_volume = expand_volume_path(volume);
+        let expanded_volume = expand_volume_path(&volume);
         cmd.args(["--volume", &expanded_volume]);
     }
 
     // Set environment variable to prevent infinite recursion
     cmd.args(["--env", "STAKPAK_SKIP_WARDEN=1"]);
 
-    // If profile was specified, pass it through
-    if let Ok(profile) = std::env::var("STAKPAK_PROFILE") {
-        cmd.args(["--env", &format!("STAKPAK_PROFILE={}", profile)]);
+    // Pass the profile through from config (skip only when empty to avoid broken command)
+    if !config.profile_name.is_empty() {
+        cmd.args(["--env", &format!("STAKPAK_PROFILE={}", config.profile_name)]);
     }
 
     // Pass through API key if set
@@ -413,4 +377,151 @@ pub async fn run_stakpak_in_warden(config: AppConfig, args: &[String]) -> Result
 
     // Execute the warden command with appropriate TTY handling
     execute_warden_command(cmd, needs_tty)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ProviderType, WardenConfig};
+    use std::collections::HashMap;
+
+    /// Minimal AppConfig for testing prepare_volumes.
+    fn test_config(warden: Option<WardenConfig>) -> AppConfig {
+        AppConfig {
+            api_endpoint: "https://test".into(),
+            api_key: None,
+            mcp_server_host: None,
+            machine_name: None,
+            auto_append_gitignore: None,
+            profile_name: "test".into(),
+            config_path: "/tmp/test".into(),
+            allowed_tools: None,
+            auto_approve: None,
+            rulebooks: None,
+            warden,
+            provider: ProviderType::Remote,
+            providers: HashMap::new(),
+            smart_model: None,
+            eco_model: None,
+            recovery_model: None,
+            model: None,
+            anonymous_id: None,
+            collect_telemetry: None,
+            editor: None,
+        }
+    }
+
+    fn has_aqua_cache(volumes: &[String]) -> bool {
+        volumes.iter().any(|v| v.contains("aquaproj-aqua"))
+    }
+
+    // ── Interactive / async mode (run_stakpak_in_warden path) ──────────
+    // Uses prepare_volumes(config, false) — warden enabled flag is ignored.
+
+    #[test]
+    fn aqua_cache_present_when_warden_enabled_check_disabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec!["/tmp:/tmp:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_warden_disabled_check_disabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: false,
+            volumes: vec!["/tmp:/tmp:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_no_warden_config() {
+        let config = test_config(None);
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Default warden command (run_default_warden path) ───────────────
+    // Uses prepare_volumes(config, true) — only includes profile volumes
+    // when warden.enabled is true.
+
+    #[test]
+    fn aqua_cache_present_when_warden_enabled_check_enabled() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec!["./:/agent:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, true);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    #[test]
+    fn aqua_cache_present_when_warden_disabled_check_enabled() {
+        // check_enabled=true + enabled=false → profile volumes skipped,
+        // but aqua cache must still be present.
+        let config = test_config(Some(WardenConfig {
+            enabled: false,
+            volumes: vec!["./:/agent:ro".into()],
+        }));
+        let vols = prepare_volumes(&config, true);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Agent server / subagent sandbox path ───────────────────────────
+    // Autopilot calls prepare_volumes(config, false) and passes the result
+    // into SandboxConfig.volumes. Same as interactive mode.
+
+    #[test]
+    fn aqua_cache_present_for_agent_server_sandbox() {
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: WardenConfig::readonly_profile().volumes,
+        }));
+        let vols = prepare_volumes(&config, false);
+        assert!(has_aqua_cache(&vols), "aqua cache missing: {vols:?}");
+    }
+
+    // ── Dedup: user already has a custom aqua mount ────────────────────
+
+    #[test]
+    fn aqua_cache_not_duplicated_when_user_provides_custom_mount() {
+        let custom = "/my/aqua:/home/agent/.local/share/aquaproj-aqua".to_string();
+        let config = test_config(Some(WardenConfig {
+            enabled: true,
+            volumes: vec![custom.clone()],
+        }));
+        let vols = prepare_volumes(&config, false);
+        let aqua_count = vols.iter().filter(|v| v.contains("aquaproj-aqua")).count();
+        assert_eq!(
+            aqua_count, 1,
+            "should keep user mount, not add a second: {vols:?}"
+        );
+        assert!(vols.contains(&custom), "user mount should be preserved");
+    }
+
+    // ── expand_volume_path ─────────────────────────────────────────────
+
+    #[test]
+    fn expand_volume_path_leaves_named_volumes_unchanged() {
+        let named = "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua";
+        assert_eq!(expand_volume_path(named), named);
+    }
+
+    #[test]
+    fn expand_volume_path_expands_tilde() {
+        if let Ok(home) = std::env::var("HOME") {
+            let expanded = expand_volume_path("~/data:/data:ro");
+            assert!(
+                expanded.starts_with(&home),
+                "tilde not expanded: {expanded}"
+            );
+            assert!(
+                !expanded.starts_with('~'),
+                "tilde still present: {expanded}"
+            );
+        }
+    }
 }
