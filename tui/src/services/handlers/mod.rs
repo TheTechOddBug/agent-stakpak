@@ -55,10 +55,14 @@ fn flush_pending_user_messages_if_idle(
         user_message_text,
     } = pending_message;
 
+    // Take pending revert index if set (will be None on normal messages)
+    let revert_index = state.pending_revert_index.take();
+
     match output_tx.try_send(OutputEvent::UserMessage(
         final_input,
         shell_tool_calls,
         image_parts,
+        revert_index,
     )) {
         Ok(()) => {
             if let Err(e) = input_tx.try_send(InputEvent::AddUserMessage(user_message_text.clone()))
@@ -72,11 +76,13 @@ fn flush_pending_user_messages_if_idle(
                 final_input,
                 shell_tool_calls,
                 image_parts,
+                _revert_index,
             ))
             | tokio::sync::mpsc::error::TrySendError::Closed(OutputEvent::UserMessage(
                 final_input,
                 shell_tool_calls,
                 image_parts,
+                _revert_index,
             )),
         ) => {
             log::warn!("Failed to flush buffered UserMessage event: output channel unavailable");
@@ -1474,7 +1480,7 @@ mod tests {
         flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
 
         match output_rx.recv().await {
-            Some(OutputEvent::UserMessage(text, Some(tool_calls), image_parts)) => {
+            Some(OutputEvent::UserMessage(text, Some(tool_calls), image_parts, _revert_index)) => {
                 assert_eq!(text, "first\n\nsecond");
                 assert_eq!(tool_calls.len(), 2);
                 assert_eq!(image_parts.len(), 2);
@@ -1576,7 +1582,7 @@ mod tests {
         flush_pending_user_messages_if_idle(&mut state, &input_tx, &output_tx);
 
         match output_rx.recv().await {
-            Some(OutputEvent::UserMessage(text, _, _)) => {
+            Some(OutputEvent::UserMessage(text, _, _, _)) => {
                 assert_eq!(text, "queued");
             }
             other => panic!("unexpected output event: {:?}", other),
@@ -1625,7 +1631,7 @@ mod tests {
         );
 
         match output_rx.recv().await {
-            Some(OutputEvent::UserMessage(text, _, _)) => assert_eq!(text, "from-update"),
+            Some(OutputEvent::UserMessage(text, _, _, _)) => assert_eq!(text, "from-update"),
             other => panic!("unexpected output event: {:?}", other),
         }
 

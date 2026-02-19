@@ -89,8 +89,8 @@ pub struct AppState {
     /// Last width used for rendering (to detect width changes)
     pub last_render_width: usize,
     /// Maps line ranges to message info for click detection
-    /// Format: Vec<(start_line, end_line, message_id, is_user_message, message_text)>
-    pub line_to_message_map: Vec<(usize, usize, Uuid, bool, String)>,
+    /// Format: Vec<(start_line, end_line, message_id, is_user_message, message_text, user_message_index)>
+    pub line_to_message_map: Vec<(usize, usize, Uuid, bool, String, usize)>,
 
     // ========== Loading State ==========
     pub loading: bool,
@@ -291,6 +291,14 @@ pub struct AppState {
         HashMap<String, stakpak_shared::models::integrations::openai::TaskPauseInfo>,
     /// Buffered user messages waiting to be sent after streaming completes
     pub pending_user_messages: VecDeque<PendingUserMessage>,
+
+    // ========== Message Revert State ==========
+    /// Counter for user messages (1-indexed, incremented when user sends a message)
+    /// Used to track which user message triggered file edits for selective revert
+    pub user_message_count: usize,
+    /// Pending revert: truncate backend messages to this user message index when next message is sent
+    /// Set when user selects "Revert" action, consumed when sending the next user message
+    pub pending_revert_index: Option<usize>,
 
     // ========== Plan Mode State ==========
     /// Whether plan mode is active (set by /plan command, cleared by /new session)
@@ -661,6 +669,10 @@ impl AppState {
             plan_review_confirm: None,
             subagent_pause_info: HashMap::new(),
             init_prompt_content,
+
+            // Message revert state initialization
+            user_message_count: 0,
+            pending_revert_index: None,
 
             // Ask User inline block initialization
             show_ask_user_popup: false,

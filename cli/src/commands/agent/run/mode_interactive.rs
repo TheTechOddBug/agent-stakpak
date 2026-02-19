@@ -115,6 +115,21 @@ fn has_pending_tool_calls(messages: &[ChatMessage], tools_queue: &[ToolCall]) ->
     !get_unresolved_tool_call_ids(messages).is_empty()
 }
 
+/// Find the index in the messages Vec of the nth user message (1-indexed).
+/// Used for reverting to a specific user message by truncating the messages array.
+fn find_nth_user_message_index(messages: &[ChatMessage], n: usize) -> Option<usize> {
+    let mut count = 0;
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == Role::User {
+            count += 1;
+            if count == n {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
 pub struct RunInteractiveConfig {
     pub checkpoint_id: Option<String>,
     pub session_id: Option<String>,
@@ -477,7 +492,31 @@ pub async fn run_interactive(
                         model = new_model;
                         continue;
                     }
-                    OutputEvent::UserMessage(user_input, tool_calls_results, image_parts) => {
+                    OutputEvent::UserMessage(
+                        user_input,
+                        tool_calls_results,
+                        image_parts,
+                        revert_index,
+                    ) => {
+                        // Handle revert if provided - truncate messages to the specified user message index
+                        if let Some(target_user_idx) = revert_index {
+                            // Find the ChatMessage index for the nth user message
+                            let truncate_at =
+                                find_nth_user_message_index(&messages, target_user_idx);
+
+                            if let Some(idx) = truncate_at {
+                                // Truncate: remove target message and everything after
+                                messages.truncate(idx);
+                                // Clear the tools queue since we're reverting
+                                tools_queue.clear();
+                                log::info!(
+                                    "Reverted messages to user message index {} (truncated to {} messages)",
+                                    target_user_idx,
+                                    messages.len()
+                                );
+                            }
+                        }
+
                         let mut user_input = user_input.clone();
 
                         // Add user shell history to the user input
