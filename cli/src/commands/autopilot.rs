@@ -16,6 +16,8 @@ use crate::{
     onboarding::{OnboardingMode, run_onboarding},
 };
 
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/system_prompt.txt");
+
 #[derive(Args, PartialEq, Debug, Clone)]
 pub struct StartArgs {
     /// Bind address for embedded server runtime
@@ -1023,6 +1025,39 @@ async fn start_foreground_runtime(
         })
         .collect();
 
+    // Pre-load rulebooks and capture project directory for gateway/channel sessions
+    let startup_project_dir = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let startup_rulebooks = match runtime_client.list_rulebooks().await {
+        Ok(rulebooks) => {
+            tracing::info!(
+                count = rulebooks.len(),
+                "Loaded rulebooks for session context"
+            );
+            rulebooks
+                .iter()
+                .map(|rb| {
+                    stakpak_server::ContextFile::new(
+                        format!("rulebook:{}", rb.uri),
+                        format!("rulebook://{}", rb.uri),
+                        format!(
+                            "<rulebook>\nURI: {}\nDescription: {}\nTags: {}\n</rulebook>",
+                            rb.uri,
+                            rb.description,
+                            rb.tags.join(", ")
+                        ),
+                        stakpak_server::ContextPriority::High,
+                    )
+                })
+                .collect()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to load rulebooks; sessions will start without them");
+            Vec::new()
+        }
+    };
+
     let app_state = stakpak_server::AppState::new(
         storage,
         events,
@@ -1032,6 +1067,9 @@ async fn start_foreground_runtime(
         default_model,
         tool_approval_policy,
     )
+    .with_base_system_prompt(Some(DEFAULT_SYSTEM_PROMPT.trim().to_string()))
+    .with_project_dir(startup_project_dir)
+    .with_rulebooks(startup_rulebooks)
     .with_mcp(
         mcp_init_result.client,
         mcp_tools,

@@ -1,5 +1,6 @@
 use crate::{
     auth::{AuthConfig, require_bearer},
+    context::{ContextFile, ContextPriority},
     idempotency::{IdempotencyRequest, LookupResult, StoredResponse},
     message_bridge,
     session_actor::{ACTIVE_MODEL_METADATA_KEY, spawn_session_actor},
@@ -106,7 +107,21 @@ struct SessionMessageRequest {
     model: Option<String>,
     #[serde(default)]
     sandbox: Option<bool>,
+    #[serde(default)]
+    context: Option<Vec<CallerContextInput>>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CallerContextInput {
+    name: String,
+    content: String,
+    #[serde(default)]
+    priority: Option<String>,
+}
+
+const MAX_CALLER_CONTEXT_ITEMS: usize = 32;
+const MAX_CALLER_CONTEXT_NAME_CHARS: usize = 256;
+const MAX_CALLER_CONTEXT_CONTENT_CHARS: usize = 50_000;
 
 #[derive(Debug, Serialize)]
 struct SessionMessageResponse {
@@ -517,6 +532,8 @@ async fn sessions_message_handler(
                     api_error(StatusCode::BAD_REQUEST, "invalid_model", "Unknown model")
                 })?;
 
+            let caller_context = map_caller_context_inputs(request.context.as_deref());
+
             let state_for_spawn = state.clone();
             let message_for_spawn = request.message;
             let sandbox_config = if request.sandbox.unwrap_or(false) {
@@ -531,6 +548,7 @@ async fn sessions_message_handler(
                     let state = state_for_spawn.clone();
                     let message = message_for_spawn.clone();
                     let model = model.clone();
+                    let caller_context = caller_context.clone();
                     let sandbox_config = sandbox_config.clone();
                     async move {
                         spawn_session_actor(
@@ -539,6 +557,7 @@ async fn sessions_message_handler(
                             allocated_run_id,
                             model,
                             message,
+                            caller_context,
                             sandbox_config,
                         )
                     }
@@ -967,7 +986,80 @@ fn validate_session_message_request(request: &SessionMessageRequest) -> Option<R
         ));
     }
 
+    if let Some(context_inputs) = request.context.as_ref() {
+        if context_inputs.len() > MAX_CALLER_CONTEXT_ITEMS {
+            return Some(api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_context",
+                &format!(
+                    "context can include at most {} entries",
+                    MAX_CALLER_CONTEXT_ITEMS
+                ),
+            ));
+        }
+
+        for input in context_inputs {
+            let name_len = input.name.trim().chars().count();
+            if name_len > MAX_CALLER_CONTEXT_NAME_CHARS {
+                return Some(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_context",
+                    &format!(
+                        "context.name exceeds {} characters",
+                        MAX_CALLER_CONTEXT_NAME_CHARS
+                    ),
+                ));
+            }
+
+            let content_len = input.content.trim().chars().count();
+            if content_len > MAX_CALLER_CONTEXT_CONTENT_CHARS {
+                return Some(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_context",
+                    &format!(
+                        "context.content exceeds {} characters",
+                        MAX_CALLER_CONTEXT_CONTENT_CHARS
+                    ),
+                ));
+            }
+        }
+    }
+
     None
+}
+
+fn map_caller_context_inputs(inputs: Option<&[CallerContextInput]>) -> Vec<ContextFile> {
+    let mut files = Vec::new();
+
+    for input in inputs.unwrap_or_default() {
+        let name = input.name.trim();
+        let content = input.content.trim();
+
+        if name.is_empty() || content.is_empty() {
+            continue;
+        }
+
+        let priority = parse_context_priority(input.priority.as_deref());
+        files.push(ContextFile::new(
+            name,
+            format!("caller://{name}"),
+            content,
+            priority,
+        ));
+    }
+
+    files
+}
+
+/// Map caller-supplied priority strings to `ContextPriority`.
+/// `Critical` is reserved for internally-discovered files (e.g. AGENTS.md) and
+/// cannot be set by external API callers — it maps to `High` instead.
+fn parse_context_priority(input: Option<&str>) -> ContextPriority {
+    match input.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "critical" || value == "high" => ContextPriority::High,
+        Some(value) if value == "normal" => ContextPriority::Normal,
+        _ => ContextPriority::CallerSupplied,
+    }
 }
 
 fn extract_message_text(message: &stakai::Message) -> String {
@@ -1469,7 +1561,14 @@ mod tests {
                 "role": "user",
                 "content": "hello from stakai"
             },
-            "model": "openai/test-model"
+            "model": "openai/test-model",
+            "context": [
+                {
+                    "name": "watch_result",
+                    "content": "Health check completed successfully.",
+                    "priority": "high"
+                }
+            ]
         });
 
         let request = match Request::builder()
@@ -2524,6 +2623,110 @@ mod tests {
             .run_manager
             .mark_run_finished(session_uuid, active_run_id, Ok(()))
             .await;
+    }
+
+    #[test]
+    fn parse_context_priority_honors_known_values() {
+        // Critical is reserved for internal use; callers get High instead
+        assert!(matches!(
+            parse_context_priority(Some("critical")),
+            ContextPriority::High
+        ));
+        assert!(matches!(
+            parse_context_priority(Some("HIGH")),
+            ContextPriority::High
+        ));
+        assert!(matches!(
+            parse_context_priority(Some("normal")),
+            ContextPriority::Normal
+        ));
+        assert!(matches!(
+            parse_context_priority(Some("unknown")),
+            ContextPriority::CallerSupplied
+        ));
+    }
+
+    #[test]
+    fn map_caller_context_inputs_skips_empty_values() {
+        let mapped = map_caller_context_inputs(Some(&[
+            CallerContextInput {
+                name: "watch_result".to_string(),
+                content: "system check complete".to_string(),
+                priority: Some("high".to_string()),
+            },
+            CallerContextInput {
+                name: " ".to_string(),
+                content: "ignored".to_string(),
+                priority: None,
+            },
+            CallerContextInput {
+                name: "ignored".to_string(),
+                content: "   ".to_string(),
+                priority: None,
+            },
+        ]));
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].name, "watch_result");
+        assert!(matches!(mapped[0].priority, ContextPriority::High));
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_too_many_context_items() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(
+                (0..(MAX_CALLER_CONTEXT_ITEMS + 1))
+                    .map(|idx| CallerContextInput {
+                        name: format!("ctx-{idx}"),
+                        content: "value".to_string(),
+                        priority: None,
+                    })
+                    .collect(),
+            ),
+        };
+
+        assert!(validate_session_message_request(&request).is_some());
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_oversized_context_name() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(vec![CallerContextInput {
+                name: "n".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
+                content: "value".to_string(),
+                priority: None,
+            }]),
+        };
+
+        assert!(validate_session_message_request(&request).is_some());
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_oversized_context_content() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(vec![CallerContextInput {
+                name: "ctx".to_string(),
+                content: "x".repeat(MAX_CALLER_CONTEXT_CONTENT_CHARS + 1),
+                priority: None,
+            }]),
+        };
+
+        assert!(validate_session_message_request(&request).is_some());
     }
 
     #[tokio::test]
