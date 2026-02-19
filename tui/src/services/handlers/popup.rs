@@ -961,3 +961,63 @@ pub fn handle_model_switcher_cancel(state: &mut AppState) {
     // Clear search when closing
     state.model_switcher_search.clear();
 }
+// ========== Message Action Popup Handlers ==========
+
+/// Close the message action popup
+pub fn handle_message_action_popup_close(state: &mut AppState) {
+    state.show_message_action_popup = false;
+    state.message_action_popup_selected = 0;
+    state.message_action_popup_position = None;
+    state.message_action_target_message_id = None;
+    state.message_action_target_text = None;
+}
+
+/// Navigate within the message action popup
+pub fn handle_message_action_popup_navigate(state: &mut AppState, direction: i32) {
+    let num_actions = crate::services::message_action_popup::MessageAction::all().len();
+    if num_actions == 0 {
+        return;
+    }
+
+    if direction < 0 {
+        if state.message_action_popup_selected > 0 {
+            state.message_action_popup_selected -= 1;
+        } else {
+            state.message_action_popup_selected = num_actions - 1;
+        }
+    } else {
+        state.message_action_popup_selected =
+            (state.message_action_popup_selected + 1) % num_actions;
+    }
+}
+
+/// Execute the selected action in the message action popup
+pub fn handle_message_action_popup_execute(state: &mut AppState) {
+    use crate::services::message_action_popup::{MessageAction, get_selected_action};
+    use crate::services::text_selection::copy_to_clipboard;
+    use crate::services::toast::Toast;
+
+    let Some(action) = get_selected_action(state) else {
+        handle_message_action_popup_close(state);
+        return;
+    };
+
+    match action {
+        MessageAction::CopyMessage => {
+            // Copy the message text to clipboard
+            if let Some(text) = &state.message_action_target_text {
+                match copy_to_clipboard(text) {
+                    Ok(()) => {
+                        state.toast = Some(Toast::success("Copied!"));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to copy to clipboard: {}", e);
+                        state.toast = Some(Toast::error("Copy failed"));
+                    }
+                }
+            }
+        }
+    }
+
+    handle_message_action_popup_close(state);
+}
