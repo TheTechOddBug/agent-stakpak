@@ -404,9 +404,21 @@ pub fn update(
                 return;
             }
 
-            // --- Select / Submit: Enter ---
-            InputEvent::AskUserSelectOption | InputEvent::InputSubmitted => {
+            // --- Toggle / Select: Space (select option without advancing) ---
+            // In multi-select: toggles the checkbox
+            // In single-select: selects the option (without advancing)
+            InputEvent::AskUserSelectOption => {
                 ask_user::handle_ask_user_select_option(state, output_tx);
+                return;
+            }
+
+            // --- Confirm / Advance: Enter ---
+            // In single-select: selects current option (if none selected) and advances to next question
+            // In multi-select: confirms current selections and advances to next question
+            // On submit tab: submits all answers
+            // On custom input: confirms custom text and advances
+            InputEvent::AskUserConfirmQuestion | InputEvent::InputSubmitted => {
+                ask_user::handle_ask_user_confirm_question(state, output_tx);
                 return;
             }
             InputEvent::AskUserSubmit => {
@@ -416,7 +428,10 @@ pub fn update(
 
             // --- Custom input: character keys when on custom slot ---
             InputEvent::InputChanged(c) => {
-                if is_custom {
+                if c == ' ' && !is_custom {
+                    // Space toggles/selects the current option (same as AskUserSelectOption)
+                    ask_user::handle_ask_user_select_option(state, output_tx);
+                } else if is_custom {
                     ask_user::handle_ask_user_custom_input_changed(state, c);
                 }
                 // When not on custom slot, consume all character keys (don't type into chat)
@@ -1307,6 +1322,7 @@ pub fn update(
         | InputEvent::AskUserNextOption
         | InputEvent::AskUserPrevOption
         | InputEvent::AskUserSelectOption
+        | InputEvent::AskUserConfirmQuestion
         | InputEvent::AskUserCustomInputChanged(_)
         | InputEvent::AskUserCustomInputBackspace
         | InputEvent::AskUserCustomInputDelete
@@ -1564,9 +1580,7 @@ mod tests {
 
     #[tokio::test]
     async fn ask_user_arrows_navigate_options_via_update() {
-        use stakpak_shared::models::integrations::openai::{
-            AskUserOption, AskUserQuestion,
-        };
+        use stakpak_shared::models::integrations::openai::{AskUserOption, AskUserQuestion};
 
         let mut state = build_state();
         let (input_tx, _input_rx) = mpsc::channel(8);
@@ -1578,9 +1592,24 @@ mod tests {
             label: "Pick".to_string(),
             question: "Pick one".to_string(),
             options: vec![
-                AskUserOption { value: "a".to_string(), label: "A".to_string(), description: None, selected: false },
-                AskUserOption { value: "b".to_string(), label: "B".to_string(), description: None, selected: false },
-                AskUserOption { value: "c".to_string(), label: "C".to_string(), description: None, selected: false },
+                AskUserOption {
+                    value: "a".to_string(),
+                    label: "A".to_string(),
+                    description: None,
+                    selected: false,
+                },
+                AskUserOption {
+                    value: "b".to_string(),
+                    label: "B".to_string(),
+                    description: None,
+                    selected: false,
+                },
+                AskUserOption {
+                    value: "c".to_string(),
+                    label: "C".to_string(),
+                    description: None,
+                    selected: false,
+                },
             ],
             allow_custom: false,
             required: true,
@@ -1589,7 +1618,10 @@ mod tests {
         let tool_call = ToolCall {
             id: "tc_1".to_string(),
             r#type: "function".to_string(),
-            function: FunctionCall { name: "ask_user".to_string(), arguments: "{}".to_string() },
+            function: FunctionCall {
+                name: "ask_user".to_string(),
+                arguments: "{}".to_string(),
+            },
             metadata: None,
         };
         ask_user::handle_show_ask_user_popup(&mut state, tool_call, questions);
@@ -1597,23 +1629,60 @@ mod tests {
         assert_eq!(state.ask_user_selected_option, 0);
 
         // Down arrow — should move to next option
-        update(&mut state, InputEvent::Down, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 1, "Down should move to next option");
+        update(
+            &mut state,
+            InputEvent::Down,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 1,
+            "Down should move to next option"
+        );
 
         // Down arrow again
-        update(&mut state, InputEvent::Down, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 2, "Down should move to next option again");
+        update(
+            &mut state,
+            InputEvent::Down,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 2,
+            "Down should move to next option again"
+        );
 
         // Up arrow — should move back
-        update(&mut state, InputEvent::Up, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 1, "Up should move to prev option");
+        update(
+            &mut state,
+            InputEvent::Up,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 1,
+            "Up should move to prev option"
+        );
     }
 
     #[tokio::test]
     async fn ask_user_left_right_navigate_tabs_via_update() {
-        use stakpak_shared::models::integrations::openai::{
-            AskUserOption, AskUserQuestion,
-        };
+        use stakpak_shared::models::integrations::openai::{AskUserOption, AskUserQuestion};
 
         let mut state = build_state();
         let (input_tx, _input_rx) = mpsc::channel(8);
@@ -1625,7 +1694,12 @@ mod tests {
             AskUserQuestion {
                 label: "Q1".to_string(),
                 question: "First?".to_string(),
-                options: vec![AskUserOption { value: "a".to_string(), label: "A".to_string(), description: None, selected: false }],
+                options: vec![AskUserOption {
+                    value: "a".to_string(),
+                    label: "A".to_string(),
+                    description: None,
+                    selected: false,
+                }],
                 allow_custom: false,
                 required: true,
                 multi_select: false,
@@ -1633,7 +1707,12 @@ mod tests {
             AskUserQuestion {
                 label: "Q2".to_string(),
                 question: "Second?".to_string(),
-                options: vec![AskUserOption { value: "b".to_string(), label: "B".to_string(), description: None, selected: false }],
+                options: vec![AskUserOption {
+                    value: "b".to_string(),
+                    label: "B".to_string(),
+                    description: None,
+                    selected: false,
+                }],
                 allow_custom: false,
                 required: true,
                 multi_select: false,
@@ -1642,26 +1721,53 @@ mod tests {
         let tool_call = ToolCall {
             id: "tc_2".to_string(),
             r#type: "function".to_string(),
-            function: FunctionCall { name: "ask_user".to_string(), arguments: "{}".to_string() },
+            function: FunctionCall {
+                name: "ask_user".to_string(),
+                arguments: "{}".to_string(),
+            },
             metadata: None,
         };
         ask_user::handle_show_ask_user_popup(&mut state, tool_call, questions);
         assert_eq!(state.ask_user_current_tab, 0);
 
         // Right arrow — should move to next tab
-        update(&mut state, InputEvent::CursorRight, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_current_tab, 1, "Right should move to next tab");
+        update(
+            &mut state,
+            InputEvent::CursorRight,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_current_tab, 1,
+            "Right should move to next tab"
+        );
 
         // Left arrow — should move back
-        update(&mut state, InputEvent::CursorLeft, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_current_tab, 0, "Left should move to prev tab");
+        update(
+            &mut state,
+            InputEvent::CursorLeft,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_current_tab, 0,
+            "Left should move to prev tab"
+        );
     }
 
     #[tokio::test]
     async fn ask_user_boundary_scroll_passthrough() {
-        use stakpak_shared::models::integrations::openai::{
-            AskUserOption, AskUserQuestion,
-        };
+        use stakpak_shared::models::integrations::openai::{AskUserOption, AskUserQuestion};
 
         let mut state = build_state();
         let (input_tx, _input_rx) = mpsc::channel(8);
@@ -1672,8 +1778,18 @@ mod tests {
             label: "Pick".to_string(),
             question: "Pick one".to_string(),
             options: vec![
-                AskUserOption { value: "a".to_string(), label: "A".to_string(), description: None, selected: false },
-                AskUserOption { value: "b".to_string(), label: "B".to_string(), description: None, selected: false },
+                AskUserOption {
+                    value: "a".to_string(),
+                    label: "A".to_string(),
+                    description: None,
+                    selected: false,
+                },
+                AskUserOption {
+                    value: "b".to_string(),
+                    label: "B".to_string(),
+                    description: None,
+                    selected: false,
+                },
             ],
             allow_custom: false,
             required: true,
@@ -1682,7 +1798,10 @@ mod tests {
         let tool_call = ToolCall {
             id: "tc_3".to_string(),
             r#type: "function".to_string(),
-            function: FunctionCall { name: "ask_user".to_string(), arguments: "{}".to_string() },
+            function: FunctionCall {
+                name: "ask_user".to_string(),
+                arguments: "{}".to_string(),
+            },
             metadata: None,
         };
         ask_user::handle_show_ask_user_popup(&mut state, tool_call, questions);
@@ -1691,28 +1810,96 @@ mod tests {
         assert!(state.stay_at_bottom);
 
         // Down navigates from option 0 → 1
-        update(&mut state, InputEvent::Down, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 1, "Down should navigate to option 1");
+        update(
+            &mut state,
+            InputEvent::Down,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 1,
+            "Down should navigate to option 1"
+        );
 
         // Down at bottom boundary — falls through to scroll, may unset stay_at_bottom
-        update(&mut state, InputEvent::Down, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 1, "Down at bottom should not change option");
+        update(
+            &mut state,
+            InputEvent::Down,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 1,
+            "Down at bottom should not change option"
+        );
 
         // After boundary scroll, stay_at_bottom may be false.
         // Scroll back to bottom so arrows navigate again.
         state.stay_at_bottom = true;
 
         // Up navigates from option 1 → 0
-        update(&mut state, InputEvent::Up, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 0, "Up should navigate to option 0");
+        update(
+            &mut state,
+            InputEvent::Up,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 0,
+            "Up should navigate to option 0"
+        );
 
         // Up at top boundary — falls through to scroll (sets stay_at_bottom = false)
-        update(&mut state, InputEvent::Up, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 0, "Up at top should not change option");
-        assert!(!state.stay_at_bottom, "Scrolling up should unset stay_at_bottom");
+        update(
+            &mut state,
+            InputEvent::Up,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 0,
+            "Up at top should not change option"
+        );
+        assert!(
+            !state.stay_at_bottom,
+            "Scrolling up should unset stay_at_bottom"
+        );
 
         // Now arrows pass through to scroll (don't navigate options)
-        update(&mut state, InputEvent::Down, 10, 80, &input_tx, &output_tx, None, &shell_tx, Size::new(80, 24));
-        assert_eq!(state.ask_user_selected_option, 0, "Down while scrolled up should scroll, not navigate");
+        update(
+            &mut state,
+            InputEvent::Down,
+            10,
+            80,
+            &input_tx,
+            &output_tx,
+            None,
+            &shell_tx,
+            Size::new(80, 24),
+        );
+        assert_eq!(
+            state.ask_user_selected_option, 0,
+            "Down while scrolled up should scroll, not navigate"
+        );
     }
 }

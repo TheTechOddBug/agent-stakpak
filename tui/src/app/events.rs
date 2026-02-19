@@ -199,6 +199,7 @@ pub enum InputEvent {
     AskUserNextOption,
     AskUserPrevOption,
     AskUserSelectOption,
+    AskUserConfirmQuestion,
     AskUserCustomInputChanged(char),
     AskUserCustomInputBackspace,
     AskUserCustomInputDelete,

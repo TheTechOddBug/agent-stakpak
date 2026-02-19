@@ -32,7 +32,7 @@ use stakpak_shared::models::llm::{LLMTokenUsage, PromptTokensDetails};
 
 /// Bundled infrastructure analysis prompt (embedded at compile time)
 /// analyze the infrastructure and provide a summary of the current state
-const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v3.md");
+const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v4.md");
 use stakpak_shared::telemetry::{TelemetryEvent, capture_event};
 use stakpak_tui::{InputEvent, LoadingOperation, OutputEvent};
 use std::sync::Arc;
@@ -204,7 +204,22 @@ pub async fn run_interactive(
         let model_for_tui = model.clone();
 
         // Use  init prompt (loaded at module level as const)
-        let init_prompt_content_for_tui = Some(INIT_PROMPT.to_string());
+        // When send_init_prompt_on_start is true (stakpak init), run discovery
+        // probes in parallel and append results to the init prompt.
+        let init_prompt_content_for_tui = if config.send_init_prompt_on_start {
+            let discovery_output = crate::utils::discovery::run_all().await;
+            if discovery_output.is_empty() {
+                Some(INIT_PROMPT.to_string())
+            } else {
+                Some(format!(
+                    "{}\n\n<discovery_results>\n{}</discovery_results>",
+                    INIT_PROMPT,
+                    discovery_output.trim()
+                ))
+            }
+        } else {
+            Some(INIT_PROMPT.to_string())
+        };
 
         let send_init_prompt_on_start = config.send_init_prompt_on_start;
         let tui_handle = tokio::spawn(async move {

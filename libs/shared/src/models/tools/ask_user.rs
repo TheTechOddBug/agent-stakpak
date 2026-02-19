@@ -380,9 +380,18 @@ mod tests {
         }"#;
 
         let question: AskUserQuestion = serde_json::from_str(json).unwrap();
-        assert!(!question.multi_select, "multi_select should default to false");
-        assert!(!question.options[0].selected, "selected should default to false");
-        assert!(question.options[1].selected, "selected should be true when set");
+        assert!(
+            !question.multi_select,
+            "multi_select should default to false"
+        );
+        assert!(
+            !question.options[0].selected,
+            "selected should default to false"
+        );
+        assert!(
+            question.options[1].selected,
+            "selected should be true when set"
+        );
     }
 
     #[test]

@@ -217,13 +217,14 @@ pub fn handle_ask_user_prev_option(state: &mut AppState) -> bool {
     }
 }
 
-/// Select the current option (or submit if on Submit tab)
+/// Toggle/select the current option WITHOUT advancing to the next question.
+/// This is triggered by Space. It selects in single-select or toggles in multi-select.
 pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<OutputEvent>) {
     if !state.show_ask_user_popup {
         return;
     }
 
-    // If on Submit tab, try to submit
+    // If on Submit tab, submit (Space on submit = submit)
     if state.ask_user_current_tab >= state.ask_user_questions.len() {
         handle_ask_user_submit(state, output_tx);
         return;
@@ -236,7 +237,9 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
     if current_q.multi_select {
         // Custom input is not supported in multi-select mode (allow_custom is ignored)
         if state.ask_user_selected_option < current_q.options.len() {
-            let opt_value = current_q.options[state.ask_user_selected_option].value.clone();
+            let opt_value = current_q.options[state.ask_user_selected_option]
+                .value
+                .clone();
             let selections = state
                 .ask_user_multi_selections
                 .entry(question_label.clone())
@@ -256,8 +259,7 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
                 .cloned()
                 .unwrap_or_default();
 
-            let answer_json =
-                serde_json::to_string(&selected).unwrap_or_else(|_| "[]".to_string());
+            let answer_json = serde_json::to_string(&selected).unwrap_or_else(|_| "[]".to_string());
 
             let answer = AskUserAnswer {
                 question_label: question_label.clone(),
@@ -273,16 +275,15 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
                 state.ask_user_answers.insert(question_label, answer);
             }
         }
-        // Don't auto-advance in multi-select — user navigates manually
         refresh_ask_user_block(state);
         return;
     }
 
-    // --- Single-select mode (original behavior) ---
+    // --- Single-select mode: select without advancing ---
 
     // Check if custom input is selected
     if current_q.allow_custom && state.ask_user_selected_option == current_q.options.len() {
-        // Custom input selected - save the custom answer if not empty
+        // Custom input selected - save the custom answer if not empty (no advance)
         if !state.ask_user_custom_input.is_empty() {
             let answer = AskUserAnswer {
                 question_label: question_label.clone(),
@@ -293,19 +294,12 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
             state
                 .ask_user_answers
                 .insert(current_q.label.clone(), answer);
-
-            // Auto-advance to next question or Submit
-            if state.ask_user_current_tab < state.ask_user_questions.len() {
-                state.ask_user_current_tab += 1;
-                state.ask_user_selected_option = 0;
-                state.ask_user_custom_input.clear();
-            }
         }
         refresh_ask_user_block(state);
         return;
     }
 
-    // Regular option selected
+    // Regular option selected (no advance)
     if let Some(opt) = current_q.options.get(state.ask_user_selected_option) {
         let answer = AskUserAnswer {
             question_label,
@@ -316,15 +310,45 @@ pub fn handle_ask_user_select_option(state: &mut AppState, output_tx: &Sender<Ou
         state
             .ask_user_answers
             .insert(current_q.label.clone(), answer);
-
-        // Auto-advance to next question or Submit
-        if state.ask_user_current_tab < state.ask_user_questions.len() {
-            state.ask_user_current_tab += 1;
-            state.ask_user_selected_option = 0;
-            state.ask_user_custom_input.clear();
-        }
     }
     refresh_ask_user_block(state);
+}
+
+/// Confirm the current question and advance to the next one.
+/// This is triggered by Enter. It ONLY advances — it never selects or toggles.
+/// Use Space to select/toggle options. On the submit tab, Enter submits.
+pub fn handle_ask_user_confirm_question(state: &mut AppState, output_tx: &Sender<OutputEvent>) {
+    if !state.show_ask_user_popup {
+        return;
+    }
+
+    // If on Submit tab, submit
+    if state.ask_user_current_tab >= state.ask_user_questions.len() {
+        handle_ask_user_submit(state, output_tx);
+        return;
+    }
+
+    let current_q = &state.ask_user_questions[state.ask_user_current_tab];
+
+    // If custom input is selected and has text, save it before advancing
+    if !current_q.multi_select
+        && current_q.allow_custom
+        && state.ask_user_selected_option == current_q.options.len()
+        && !state.ask_user_custom_input.is_empty()
+    {
+        let answer = AskUserAnswer {
+            question_label: current_q.label.clone(),
+            answer: state.ask_user_custom_input.clone(),
+            is_custom: true,
+            selected_values: vec![],
+        };
+        state
+            .ask_user_answers
+            .insert(current_q.label.clone(), answer);
+    }
+
+    // Just advance — don't select anything
+    handle_ask_user_next_tab(state);
 }
 
 /// Handle character input for custom answer
@@ -719,7 +743,7 @@ mod tests {
 
         handle_show_ask_user_popup(&mut state, tool_call, questions);
 
-        // Select first option (dev)
+        // Select first option (dev) via Space — should NOT auto-advance
         handle_ask_user_select_option(&mut state, &output_tx);
 
         // Should have recorded the answer
@@ -728,7 +752,11 @@ mod tests {
         assert_eq!(answer.answer, "dev");
         assert!(!answer.is_custom);
 
-        // Should auto-advance to next question
+        // Should stay on the same tab (no auto-advance)
+        assert_eq!(state.ask_user_current_tab, 0);
+
+        // Now confirm via Enter — should advance to next question
+        handle_ask_user_confirm_question(&mut state, &output_tx);
         assert_eq!(state.ask_user_current_tab, 1);
     }
 
@@ -1161,12 +1189,16 @@ mod tests {
                 assert!(parsed.completed);
                 assert_eq!(parsed.answers.len(), 1);
                 assert_eq!(parsed.answers[0].selected_values.len(), 2);
-                assert!(parsed.answers[0]
-                    .selected_values
-                    .contains(&"repo:api".to_string()));
-                assert!(parsed.answers[0]
-                    .selected_values
-                    .contains(&"repo:web".to_string()));
+                assert!(
+                    parsed.answers[0]
+                        .selected_values
+                        .contains(&"repo:api".to_string())
+                );
+                assert!(
+                    parsed.answers[0]
+                        .selected_values
+                        .contains(&"repo:web".to_string())
+                );
             }
             _ => panic!("Expected AskUserResponse event"),
         }

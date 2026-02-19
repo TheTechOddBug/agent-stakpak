@@ -2425,30 +2425,31 @@ pub fn render_ask_user_block(
 
             if let Some(answer) = answers.get(&q.label) {
                 // Collect display labels for the answer(s)
-                let answer_labels: Vec<String> = if q.multi_select && !answer.selected_values.is_empty() {
-                    answer
-                        .selected_values
-                        .iter()
-                        .map(|val| {
+                let answer_labels: Vec<String> =
+                    if q.multi_select && !answer.selected_values.is_empty() {
+                        answer
+                            .selected_values
+                            .iter()
+                            .map(|val| {
+                                q.options
+                                    .iter()
+                                    .find(|o| &o.value == val)
+                                    .map(|o| o.label.clone())
+                                    .unwrap_or_else(|| val.clone())
+                            })
+                            .collect()
+                    } else {
+                        let display = if answer.is_custom {
+                            answer.answer.clone()
+                        } else {
                             q.options
                                 .iter()
-                                .find(|o| &o.value == val)
+                                .find(|o| o.value == answer.answer)
                                 .map(|o| o.label.clone())
-                                .unwrap_or_else(|| val.clone())
-                        })
-                        .collect()
-                } else {
-                    let display = if answer.is_custom {
-                        answer.answer.clone()
-                    } else {
-                        q.options
-                            .iter()
-                            .find(|o| o.value == answer.answer)
-                            .map(|o| o.label.clone())
-                            .unwrap_or_else(|| answer.answer.clone())
+                                .unwrap_or_else(|| answer.answer.clone())
+                        };
+                        vec![display]
                     };
-                    vec![display]
-                };
 
                 // Render each answer label with uniform [✓] style
                 for label in &answer_labels {
@@ -2585,28 +2586,34 @@ pub fn render_ask_user_block(
             };
 
             // Uniform bracket rendering:
-            //   [*] = cursor is here (both modes)
+            //   [›] = cursor is here, not checked (multi-select)
+            //   [✓] = checked (cursor shown via underline/bold style)
+            //   [ ] = unchecked (not cursor)
+            //   [›] = cursor is here (single-select, not yet selected)
             //   [✓] = selected in single-select
-            //   [x] = checked in multi-select
-            //   [ ] = unchecked in multi-select (not cursor)
             //   [n] = numbered in single-select (not cursor, not selected)
             let bracket = if q.multi_select {
-                if is_cursor && !is_checked {
-                    "[*]".to_string()
-                } else if is_checked {
-                    "[x]".to_string()
+                if is_checked {
+                    "[✓]".to_string()
+                } else if is_cursor {
+                    "[›]".to_string()
                 } else {
                     "[ ]".to_string()
                 }
             } else if is_checked {
                 "[✓]".to_string()
             } else if is_cursor {
-                "[*]".to_string()
+                "[›]".to_string()
             } else {
                 format!("[{}]", i + 1)
             };
 
-            let bracket_style = if is_checked {
+            let bracket_style = if is_cursor && is_checked {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else if is_checked {
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD)
@@ -2618,7 +2625,12 @@ pub fn render_ask_user_block(
                 Style::default().fg(Color::DarkGray)
             };
 
-            let label_style = if is_checked {
+            let label_style = if is_cursor && is_checked {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else if is_checked {
                 Style::default().fg(Color::Cyan)
             } else if is_cursor {
                 Style::default()
@@ -2675,7 +2687,7 @@ pub fn render_ask_user_block(
                 )
             } else if is_selected {
                 (
-                    "[*]".to_string(),
+                    "[›]".to_string(),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -2808,19 +2820,46 @@ pub fn render_ask_user_block(
                     Span::styled(" back", Style::default().fg(Color::Cyan)),
                 ]
             } else {
-                vec![
-                    Span::styled("Enter", Style::default().fg(Color::DarkGray)),
-                    Span::styled(" select", Style::default().fg(Color::Cyan)),
-                    Span::raw(" · "),
-                    Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
-                    Span::styled(" options", Style::default().fg(Color::Cyan)),
-                    Span::raw(" · "),
-                    Span::styled("←/→", Style::default().fg(Color::DarkGray)),
-                    Span::styled(" questions", Style::default().fg(Color::Cyan)),
-                    Span::raw(" · "),
-                    Span::styled("Esc", Style::default().fg(Color::DarkGray)),
-                    Span::styled(" cancel", Style::default().fg(Color::Cyan)),
-                ]
+                let is_multi = questions
+                    .get(current_tab)
+                    .map(|q| q.multi_select)
+                    .unwrap_or(false);
+
+                if is_multi {
+                    vec![
+                        Span::styled("Space", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" toggle", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" next", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" options", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("←/→", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" questions", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" cancel", Style::default().fg(Color::Cyan)),
+                    ]
+                } else {
+                    vec![
+                        Span::styled("Space", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" select", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" next", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("↑/↓", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" options", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("←/→", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" questions", Style::default().fg(Color::Cyan)),
+                        Span::raw(" · "),
+                        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" cancel", Style::default().fg(Color::Cyan)),
+                    ]
+                }
             }
         };
 
