@@ -294,8 +294,8 @@ fn render_toast(f: &mut Frame, state: &mut AppState) {
         return;
     };
 
-    let text = "Copied to clipboard!";
-    let padding_x = 2;
+    let text = "Copied to clipboard";
+    let padding_x = 1;
     let text_width = text.len() + (padding_x * 2);
     let screen = f.area();
 
