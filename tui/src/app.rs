@@ -12,6 +12,7 @@ use crate::services::board_tasks::TaskProgress;
 use crate::services::changeset::{Changeset, SidePanelSection, TodoItem};
 use crate::services::detect_term::AdaptiveColors;
 use crate::services::file_search::{FileSearch, file_search_worker, find_at_trigger};
+#[cfg(unix)]
 use crate::services::helper_block::push_error_message;
 use crate::services::helper_block::push_styled_message;
 use crate::services::message::Message;

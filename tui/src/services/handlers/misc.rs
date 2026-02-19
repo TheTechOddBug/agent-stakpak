@@ -254,9 +254,9 @@ pub fn handle_attempt_quit(state: &mut AppState, input_tx: &tokio::sync::mpsc::S
 }
 
 /// Handle toggle mouse capture event
-pub fn handle_toggle_mouse_capture(state: &mut AppState) {
+pub fn handle_toggle_mouse_capture(_state: &mut AppState) {
     #[cfg(unix)]
-    let _ = crate::toggle_mouse_capture(state);
+    let _ = crate::toggle_mouse_capture(_state);
 }
 
 /// Handle set sessions event

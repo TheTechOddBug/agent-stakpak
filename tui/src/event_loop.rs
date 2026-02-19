@@ -61,9 +61,9 @@ pub async fn run_tui(
 
     // Detect terminal for adaptive colors (but always enable mouse capture)
     #[cfg(unix)]
-    let terminal_info = crate::services::detect_term::detect_terminal();
-    #[allow(unused_variables)]
-    let _ = terminal_info; // Used for adaptive colors, kept for future use
+    {
+        let _terminal_info = crate::services::detect_term::detect_terminal();
+    }
 
     execute!(
         std::io::stdout(),
