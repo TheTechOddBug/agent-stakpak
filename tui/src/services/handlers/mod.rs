@@ -264,11 +264,11 @@ pub fn update(
                     crate::services::plan_review::close_plan_review(state);
                     return;
                 }
-                InputEvent::Up | InputEvent::PlanReviewCursorUp => {
+                InputEvent::Up | InputEvent::ScrollUp | InputEvent::PlanReviewCursorUp => {
                     crate::services::plan_review::cursor_up(state);
                     return;
                 }
-                InputEvent::Down | InputEvent::PlanReviewCursorDown => {
+                InputEvent::Down | InputEvent::ScrollDown | InputEvent::PlanReviewCursorDown => {
                     crate::services::plan_review::cursor_down(state);
                     return;
                 }
