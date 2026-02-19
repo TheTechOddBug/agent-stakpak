@@ -21,6 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use stakpak_shared::models::integrations::openai::ToolCall;
+use stakpak_shared::utils::strip_tool_name;
 
 /// Approval status for a tool call
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,7 +41,7 @@ pub struct ApprovalAction {
 
 impl ApprovalAction {
     pub fn new(tool_call: ToolCall) -> Self {
-        let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+        let tool_name = strip_tool_name(&tool_call.function.name);
 
         let label = if tool_name == "dynamic_subagent_task" {
             // Parse description and sandbox flag from arguments for a meaningful label

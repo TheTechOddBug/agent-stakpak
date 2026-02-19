@@ -10,6 +10,7 @@ use stakpak_shared::models::integrations::openai::{
     ProgressType, ToolCall, ToolCallResult, ToolCallResultProgress, ToolCallResultStatus,
     ToolCallStreamInfo,
 };
+use stakpak_shared::utils::strip_tool_name;
 use tokio::sync::mpsc::Sender;
 
 use super::shell::extract_command_from_tool_call;
@@ -99,7 +100,7 @@ pub fn handle_stream_tool_result(
     let is_run_command = state
         .dialog_command
         .as_ref()
-        .map(|tc| crate::utils::strip_tool_name(&tc.function.name) == "run_command")
+        .map(|tc| strip_tool_name(&tc.function.name) == "run_command")
         .unwrap_or(false);
 
     let command_str = if is_run_command {
@@ -509,7 +510,7 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
     };
 
     // Normalize/Strip tool name for checking
-    let tool_name_stripped = crate::utils::strip_tool_name(function_name);
+    let tool_name_stripped = strip_tool_name(function_name);
 
     match tool_name_stripped {
         "write_to_file" | "create" | "create_file" => {
@@ -813,7 +814,7 @@ pub fn create_pending_block_for_selected_tool(state: &mut AppState) {
     // Get the currently selected tool call
     if let Some(action) = state.approval_bar.selected_action() {
         let tool_call = &action.tool_call;
-        let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+        let tool_name = strip_tool_name(&tool_call.function.name);
 
         // Determine the approval state for display
         let auto_approve = action.status == crate::services::approval_bar::ApprovalStatus::Approved;
