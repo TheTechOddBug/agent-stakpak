@@ -269,6 +269,7 @@ impl Dispatcher {
                     model: self.default_model.clone(),
                     message_type: MessageType::Message,
                     run_id: None,
+                    sandbox: None,
                 },
             )
             .await;

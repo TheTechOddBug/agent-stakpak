@@ -111,9 +111,11 @@ mod tests {
             enable_slack_tools: None,
             enable_subagents: None,
             pause_on_approval: None,
+            sandbox: None,
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            enabled: true,
         }
     }
 
@@ -132,9 +134,11 @@ mod tests {
             enable_slack_tools: None,
             enable_subagents: None,
             pause_on_approval: None,
+            sandbox: None,
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            enabled: true,
         }
     }
 

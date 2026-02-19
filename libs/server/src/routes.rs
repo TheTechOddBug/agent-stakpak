@@ -104,6 +104,8 @@ struct SessionMessageRequest {
     run_id: Option<Uuid>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    sandbox: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -517,6 +519,11 @@ async fn sessions_message_handler(
 
             let state_for_spawn = state.clone();
             let message_for_spawn = request.message;
+            let sandbox_config = if request.sandbox.unwrap_or(false) {
+                state.sandbox_config.clone()
+            } else {
+                None
+            };
 
             let run_id = state
                 .run_manager
@@ -524,8 +531,16 @@ async fn sessions_message_handler(
                     let state = state_for_spawn.clone();
                     let message = message_for_spawn.clone();
                     let model = model.clone();
+                    let sandbox_config = sandbox_config.clone();
                     async move {
-                        spawn_session_actor(state, session_id, allocated_run_id, model, message)
+                        spawn_session_actor(
+                            state,
+                            session_id,
+                            allocated_run_id,
+                            model,
+                            message,
+                            sandbox_config,
+                        )
                     }
                 })
                 .await

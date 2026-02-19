@@ -34,6 +34,10 @@ pub enum AuthCommands {
         #[arg(long)]
         api_key: Option<String>,
 
+        /// Custom API endpoint URL (provider-specific, non-interactive --api-key flow)
+        #[arg(long)]
+        endpoint: Option<String>,
+
         /// AWS region for Bedrock provider (e.g., "us-east-1")
         #[arg(long)]
         region: Option<String>,
@@ -73,6 +77,7 @@ impl AuthCommands {
                 provider,
                 profile,
                 api_key,
+                endpoint,
                 region,
                 profile_name,
             } => {
@@ -81,6 +86,7 @@ impl AuthCommands {
                     &provider,
                     profile.as_deref(),
                     api_key,
+                    endpoint,
                     region,
                     profile_name,
                 )

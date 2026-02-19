@@ -10,6 +10,7 @@ use stakpak_shared::models::integrations::openai::{
     ProgressType, ToolCall, ToolCallResult, ToolCallResultProgress, ToolCallResultStatus,
     ToolCallStreamInfo,
 };
+use stakpak_shared::utils::strip_tool_name;
 use tokio::sync::mpsc::Sender;
 
 use super::shell::extract_command_from_tool_call;
@@ -24,6 +25,11 @@ pub fn handle_stream_tool_result(
     let tool_call_id = progress.id;
     // Check if this tool call is already completed - if so, ignore streaming updates
     if state.completed_tool_calls.contains(&tool_call_id) {
+        return None;
+    }
+
+    // Ignore late streaming events after cancellation was requested
+    if state.cancel_requested {
         return None;
     }
 
@@ -99,7 +105,7 @@ pub fn handle_stream_tool_result(
     let is_run_command = state
         .dialog_command
         .as_ref()
-        .map(|tc| crate::utils::strip_tool_name(&tc.function.name) == "run_command")
+        .map(|tc| strip_tool_name(&tc.function.name) == "run_command")
         .unwrap_or(false);
 
     let command_str = if is_run_command {
@@ -384,11 +390,17 @@ pub fn handle_toggle_approval_status(state: &mut AppState) {
 /// Handle approval bar next tab event
 pub fn handle_approval_popup_next_tab(state: &mut AppState) {
     state.approval_bar.select_next();
+    // Scroll to show the beginning of the tool call block
+    state.scroll_to_last_message_start = true;
+    state.stay_at_bottom = false;
 }
 
 /// Handle approval bar prev tab event
 pub fn handle_approval_popup_prev_tab(state: &mut AppState) {
     state.approval_bar.select_prev();
+    // Scroll to show the beginning of the tool call block
+    state.scroll_to_last_message_start = true;
+    state.stay_at_bottom = false;
 }
 
 /// Handle approval bar toggle approval event
@@ -509,7 +521,7 @@ pub fn handle_tool_result(state: &mut AppState, result: ToolCallResult) {
     };
 
     // Normalize/Strip tool name for checking
-    let tool_name_stripped = crate::utils::strip_tool_name(function_name);
+    let tool_name_stripped = strip_tool_name(function_name);
 
     // Get current user message index for tracking (used for selective revert)
     let user_msg_index = state.user_message_count;
@@ -905,7 +917,7 @@ pub fn create_pending_block_for_selected_tool(state: &mut AppState) {
     // Get the currently selected tool call
     if let Some(action) = state.approval_bar.selected_action() {
         let tool_call = &action.tool_call;
-        let tool_name = crate::utils::strip_tool_name(&tool_call.function.name);
+        let tool_name = strip_tool_name(&tool_call.function.name);
 
         // Determine the approval state for display
         let auto_approve = action.status == crate::services::approval_bar::ApprovalStatus::Approved;

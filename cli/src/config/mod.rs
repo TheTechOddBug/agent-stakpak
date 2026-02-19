@@ -14,7 +14,7 @@ pub mod models_cache;
 mod profile;
 mod rulebook;
 mod types;
-mod warden;
+pub(crate) mod warden;
 
 #[cfg(test)]
 mod tests;

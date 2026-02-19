@@ -699,6 +699,7 @@ impl TodoItem {
 /// Side panel section identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SidePanelSection {
+    Plan,
     Context,
     Billing,
     Tasks,
@@ -708,6 +709,7 @@ pub enum SidePanelSection {
 impl SidePanelSection {
     pub fn title(&self) -> &'static str {
         match self {
+            SidePanelSection::Plan => "Plan",
             SidePanelSection::Context => "Context",
             SidePanelSection::Billing => "Billing",
             SidePanelSection::Tasks => "Tasks",
@@ -717,16 +719,18 @@ impl SidePanelSection {
 
     pub fn next(&self) -> Self {
         match self {
+            SidePanelSection::Plan => SidePanelSection::Context,
             SidePanelSection::Context => SidePanelSection::Billing,
             SidePanelSection::Billing => SidePanelSection::Tasks,
             SidePanelSection::Tasks => SidePanelSection::Changeset,
-            SidePanelSection::Changeset => SidePanelSection::Context,
+            SidePanelSection::Changeset => SidePanelSection::Plan,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            SidePanelSection::Context => SidePanelSection::Changeset,
+            SidePanelSection::Plan => SidePanelSection::Changeset,
+            SidePanelSection::Context => SidePanelSection::Plan,
             SidePanelSection::Billing => SidePanelSection::Context,
             SidePanelSection::Tasks => SidePanelSection::Billing,
             SidePanelSection::Changeset => SidePanelSection::Tasks,
