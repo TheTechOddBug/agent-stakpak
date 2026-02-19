@@ -14,7 +14,8 @@ use crate::commands::watch::reconciler::{
 };
 use crate::commands::watch::{
     AgentServerConnection, RunStatus, ScheduleConfig, ScheduleDb, Scheduler, SpawnConfig,
-    assemble_prompt, is_process_running, run_check_script, spawn_agent,
+    assemble_prompt, build_schedule_caller_context, is_process_running, run_check_script,
+    spawn_agent,
 };
 use chrono::{DateTime, Utc};
 use croner::Cron;
@@ -636,8 +637,9 @@ async fn handle_schedule_event(
         None
     };
 
-    // Assemble prompt
-    let prompt = assemble_prompt(schedule, check_result.as_ref());
+    // Assemble prompt + structured caller context
+    let prompt = assemble_prompt(schedule);
+    let caller_context = build_schedule_caller_context(schedule, check_result.as_ref());
 
     info!(schedule = %schedule.name, "Waking agent");
     print_event("agent", &schedule.name, "Spawning agent...");
@@ -652,6 +654,7 @@ async fn handle_schedule_event(
         enable_subagents: schedule.effective_enable_subagents(&config.defaults),
         pause_on_approval: schedule.effective_pause_on_approval(&config.defaults),
         sandbox: schedule.effective_sandbox(&config.defaults),
+        caller_context,
         server: server.clone(),
     };
 

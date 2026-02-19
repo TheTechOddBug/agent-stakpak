@@ -6176,6 +6176,7 @@ dependencies = [
  "serde_json",
  "stakai",
  "stakpak-agent-core",
+ "stakpak-shared",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",

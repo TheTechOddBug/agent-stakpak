@@ -154,7 +154,10 @@ async fn run_session_actor(
     let session_cwd = resolve_session_cwd(&state, session_id).await;
     let environment = EnvironmentContext::snapshot(&session_cwd).await;
 
-    // Combine caller context with pre-loaded rulebooks from AppState
+    // Combine caller context with pre-loaded rulebooks from AppState.
+    // Explicit caller context should force per-turn injection, even on resumed
+    // sessions, while startup rulebooks remain baseline context.
+    let has_runtime_caller_context = !caller_context.is_empty();
     let mut all_caller_context = caller_context;
     all_caller_context.extend(state.rulebooks.iter().cloned());
 
@@ -169,7 +172,9 @@ async fn run_session_actor(
         .budget(state.context_budget.clone())
         .build();
 
-    if is_new_session && let Some(context_block) = session_context.user_context_block.as_deref() {
+    if (is_new_session || has_runtime_caller_context)
+        && let Some(context_block) = session_context.user_context_block.as_deref()
+    {
         user_message = prepend_context_to_user_message(user_message, context_block);
     }
 

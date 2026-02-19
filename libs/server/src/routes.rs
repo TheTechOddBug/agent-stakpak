@@ -22,6 +22,10 @@ use stakpak_agent_core::{AgentCommand, AgentEvent, ToolDecision};
 use stakpak_api::{
     ListSessionsQuery, SessionStatus, StorageCreateSessionRequest, StorageUpdateSessionRequest,
 };
+use stakpak_shared::models::context::{
+    CallerContextInput, MAX_CALLER_CONTEXT_CONTENT_CHARS, MAX_CALLER_CONTEXT_ITEMS,
+    MAX_CALLER_CONTEXT_NAME_CHARS,
+};
 use std::{collections::HashMap, convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -110,18 +114,6 @@ struct SessionMessageRequest {
     #[serde(default)]
     context: Option<Vec<CallerContextInput>>,
 }
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct CallerContextInput {
-    name: String,
-    content: String,
-    #[serde(default)]
-    priority: Option<String>,
-}
-
-const MAX_CALLER_CONTEXT_ITEMS: usize = 32;
-const MAX_CALLER_CONTEXT_NAME_CHARS: usize = 256;
-const MAX_CALLER_CONTEXT_CONTENT_CHARS: usize = 50_000;
 
 #[derive(Debug, Serialize)]
 struct SessionMessageResponse {
@@ -999,7 +991,7 @@ fn validate_session_message_request(request: &SessionMessageRequest) -> Option<R
         }
 
         for input in context_inputs {
-            let name_len = input.name.trim().chars().count();
+            let name_len = input.name.chars().count();
             if name_len > MAX_CALLER_CONTEXT_NAME_CHARS {
                 return Some(api_error(
                     StatusCode::BAD_REQUEST,
@@ -1011,7 +1003,7 @@ fn validate_session_message_request(request: &SessionMessageRequest) -> Option<R
                 ));
             }
 
-            let content_len = input.content.trim().chars().count();
+            let content_len = input.content.chars().count();
             if content_len > MAX_CALLER_CONTEXT_CONTENT_CHARS {
                 return Some(api_error(
                     StatusCode::BAD_REQUEST,
@@ -2703,6 +2695,24 @@ mod tests {
             sandbox: None,
             context: Some(vec![CallerContextInput {
                 name: "n".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
+                content: "value".to_string(),
+                priority: None,
+            }]),
+        };
+
+        assert!(validate_session_message_request(&request).is_some());
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_whitespace_padded_context_name() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(vec![CallerContextInput {
+                name: " ".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
                 content: "value".to_string(),
                 priority: None,
             }]),
