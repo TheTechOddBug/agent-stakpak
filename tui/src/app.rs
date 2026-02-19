@@ -317,6 +317,8 @@ pub struct AppState {
     pub ask_user_message_id: Option<Uuid>,
     /// Whether the ask_user block has keyboard focus (Tab toggles)
     pub ask_user_focused: bool,
+    /// Multi-select toggle state: question label -> list of currently selected option values
+    pub ask_user_multi_selections: HashMap<String, Vec<String>>,
 }
 
 pub struct AppStateOptions<'a> {
@@ -612,6 +614,7 @@ impl AppState {
             ask_user_tool_call: None,
             ask_user_message_id: None,
             ask_user_focused: true,
+            ask_user_multi_selections: HashMap::new(),
         }
     }
 
