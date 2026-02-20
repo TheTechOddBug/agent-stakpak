@@ -31,9 +31,9 @@ pub fn convert_xml_tags_to_markdown(text: &str) -> String {
         ("<scratchpad>", "## **Scratchpad**\n"),
         ("<todo>", "### **Todo**\n"),
         ("<local_context>", "### **Local Context**\n"),
-        ("<available_skills>", "### **Available Skills**\n"),
+        ("<available_skills>", "### **Remote Skills**\n"),
         // Legacy tag kept for backward compatibility with older checkpoints.
-        ("<rulebooks>", "### **Rulebooks**\n"),
+        ("<rulebooks>", "### **Remote Skills**\n"),
     ];
 
     let closing_patterns = [
@@ -108,7 +108,15 @@ mod tests {
     #[test]
     fn test_convert_available_skills_tag_to_markdown() {
         let input = "<available_skills>\n- skill one\n</available_skills>";
-        let expected = "### **Available Skills**\n\n- skill one\n";
+        let expected = "### **Remote Skills**\n\n- skill one\n";
+        let result = convert_xml_tags_to_markdown(input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_convert_legacy_rulebooks_tag_to_remote_skills_markdown() {
+        let input = "<rulebooks>\n- skill one\n</rulebooks>";
+        let expected = "### **Remote Skills**\n\n- skill one\n";
         let result = convert_xml_tags_to_markdown(input);
         assert_eq!(result, expected);
     }
