@@ -28,6 +28,9 @@ pub struct Dispatcher {
     channels: HashMap<String, Arc<dyn Channel>>,
     store: Arc<GatewayStore>,
     router_config: RouterConfig,
+    // TODO: persist dispatcher state (active_runs, pending_queues, event_cursors) to store
+    // for crash recovery. Current behavior relies on watch-side reconciler for eventual
+    // consistency after gateway restart.
     active_runs: Mutex<HashMap<String, ActiveRun>>,
     pending_queues: Mutex<HashMap<String, Vec<QueuedMessage>>>,
     event_cursors: Mutex<HashMap<String, u64>>,
@@ -373,16 +376,18 @@ impl Dispatcher {
             return Ok(());
         };
 
-        self.start_run(
-            session_id.to_string(),
-            QueuedMessage {
-                inbound: latest.inbound.clone(),
-                text: combined_text,
-                run_options: latest.run_options.clone(),
-            },
-            run_tx,
-        )
-        .await
+        let queued = QueuedMessage {
+            inbound: latest.inbound.clone(),
+            text: combined_text,
+            run_options: latest.run_options.clone(),
+        };
+
+        if let Err(error) = self.start_run(session_id.to_string(), queued, run_tx).await {
+            self.restore_queue(session_id.to_string(), queue)?;
+            return Err(error);
+        }
+
+        Ok(())
     }
 
     fn render_title(&self, inbound: &InboundMessage) -> String {
@@ -422,6 +427,19 @@ impl Dispatcher {
         Ok(())
     }
 
+    fn restore_queue(&self, session_id: String, drained: Vec<QueuedMessage>) -> Result<(), String> {
+        let mut guard = self
+            .pending_queues
+            .lock()
+            .map_err(|_| "failed to lock pending_queues".to_string())?;
+
+        let entry = guard.entry(session_id).or_default();
+        let existing = std::mem::take(entry);
+        *entry = merge_drained_queue(drained, existing);
+
+        Ok(())
+    }
+
     fn remove_active_run(&self, session_id: &str, run_id: &str) {
         if let Ok(mut guard) = self.active_runs.lock()
             && let Some(active) = guard.get(session_id)
@@ -457,6 +475,14 @@ impl Dispatcher {
         guard.insert(session_id.to_string(), next);
         Ok(())
     }
+}
+
+fn merge_drained_queue(
+    mut drained: Vec<QueuedMessage>,
+    mut existing: Vec<QueuedMessage>,
+) -> Vec<QueuedMessage> {
+    drained.append(&mut existing);
+    drained
 }
 
 async fn consume_run_events(
@@ -501,7 +527,7 @@ async fn consume_run_events(
                 return RunOutcome::Cancelled { cursor };
             }
             _ = &mut timeout_future => {
-                flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
                 deliver_channel_text(&run_context.channels, &run_context.delivery, "⏱️ Interactive run timed out.").await;
                 return RunOutcome::Error { cursor };
             }
@@ -509,11 +535,11 @@ async fn consume_run_events(
                 let event = match next {
                     Ok(Some(event)) => event,
                     Ok(None) => {
-                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
                         return RunOutcome::StreamEnded { cursor };
                     }
                     Err(error) => {
-                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
                         warn!(error = %error, "run event stream read failed");
                         return RunOutcome::Error { cursor };
                     }
@@ -533,14 +559,14 @@ async fn consume_run_events(
                             streamed_buffer.push_str(&delta);
 
                             if should_flush_stream_buffer(&streamed_buffer, last_stream_at.elapsed()) {
-                                flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                                flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, false).await;
                                 last_stream_at = Instant::now();
                             }
                         }
                     }
                     "tool_calls_proposed" => {
                         if let Some(proposed) = event.as_tool_calls_proposed() {
-                            flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                            flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
 
                             let tool_names = proposed
                                 .tool_calls
@@ -569,16 +595,27 @@ async fn consume_run_events(
                         }
                     }
                     "run_completed" => {
-                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
                         return RunOutcome::Completed { cursor };
                     }
                     "run_error" => {
-                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer).await;
+                        flush_stream_buffer(&run_context.channels, &run_context.delivery, &mut streamed_buffer, true).await;
                         let error_text = event
                             .as_run_error()
                             .and_then(|payload| payload.error)
-                            .unwrap_or_else(|| "Agent run failed".to_string());
-                        deliver_channel_text(&run_context.channels, &run_context.delivery, format!("⚠️ {error_text}")).await;
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        warn!(
+                            session_id = %run_context.session_id,
+                            run_id = %run_context.run_id,
+                            error = %error_text,
+                            "interactive run failed"
+                        );
+                        deliver_channel_text(
+                            &run_context.channels,
+                            &run_context.delivery,
+                            format!("⚠️ Agent run failed (session: {})", run_context.session_id),
+                        )
+                        .await;
 
                         return RunOutcome::Error { cursor };
                     }
@@ -597,22 +634,50 @@ fn should_flush_stream_buffer(buffer: &str, elapsed_since_last_stream: Duration)
         return false;
     }
 
-    buffer.contains("\n\n")
-        || buffer.chars().count() >= STREAM_MAX_BUFFER_LEN
-        || elapsed_since_last_stream >= STREAM_MIN_INTERVAL
+    if buffer.contains("\n\n") {
+        return true;
+    }
+
+    let has_complete_line = buffer.contains('\n');
+    has_complete_line
+        && (buffer.chars().count() >= STREAM_MAX_BUFFER_LEN
+            || elapsed_since_last_stream >= STREAM_MIN_INTERVAL)
+}
+
+fn take_completed_line_chunk(buffer: &mut String) -> Option<String> {
+    let split_index = buffer.rfind('\n')?;
+    let split_after = split_index + '\n'.len_utf8();
+
+    let remainder = buffer.split_off(split_after);
+    let chunk = std::mem::replace(buffer, remainder);
+
+    Some(chunk)
 }
 
 async fn flush_stream_buffer(
     channels: &HashMap<String, Arc<dyn Channel>>,
     delivery: &DeliveryContext,
     buffer: &mut String,
+    force: bool,
 ) {
     if buffer.trim().is_empty() {
         buffer.clear();
         return;
     }
 
-    let text = std::mem::take(buffer);
+    let text = if force {
+        std::mem::take(buffer)
+    } else {
+        let Some(chunk) = take_completed_line_chunk(buffer) else {
+            return;
+        };
+        chunk
+    };
+
+    if text.trim().is_empty() {
+        return;
+    }
+
     deliver_channel_text(channels, delivery, text.trim()).await;
 }
 
@@ -754,8 +819,8 @@ fn enrich_with_context(context: &serde_json::Value, user_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        QueuedMessage, extract_run_options, format_batched_queue_messages, sender_name,
-        should_flush_stream_buffer,
+        QueuedMessage, extract_run_options, format_batched_queue_messages, merge_drained_queue,
+        sender_name, should_flush_stream_buffer, take_completed_line_chunk,
     };
     use crate::types::{ChannelId, ChatType, InboundMessage, PeerId};
     use chrono::Utc;
@@ -788,12 +853,24 @@ mod tests {
             "hello\n\nworld",
             Duration::from_millis(100)
         ));
-        assert!(should_flush_stream_buffer(
+        assert!(!should_flush_stream_buffer(
             &"x".repeat(501),
             Duration::from_millis(100)
         ));
-        assert!(should_flush_stream_buffer("hello", Duration::from_secs(3)));
-        assert!(!should_flush_stream_buffer("hello", Duration::from_secs(1)));
+        assert!(should_flush_stream_buffer(
+            "hello\nworld",
+            Duration::from_secs(3)
+        ));
+        assert!(!should_flush_stream_buffer("hello", Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn take_completed_line_chunk_keeps_remainder() {
+        let mut buffer = String::from("line1\nline2\npartial");
+        let chunk = take_completed_line_chunk(&mut buffer).expect("chunk should exist");
+
+        assert_eq!(chunk, "line1\nline2\n");
+        assert_eq!(buffer, "partial");
     }
 
     #[test]
@@ -812,6 +889,17 @@ mod tests {
     fn sender_name_falls_back_to_username() {
         let metadata = serde_json::json!({"username": "carol"});
         assert_eq!(sender_name(&metadata).as_deref(), Some("carol"));
+    }
+
+    #[test]
+    fn merge_drained_queue_keeps_drained_messages_first() {
+        let drained = vec![queued("drained-1", Some("alice"), "u1")];
+        let existing = vec![queued("existing-1", Some("bob"), "u2")];
+
+        let merged = merge_drained_queue(drained, existing);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].text, "drained-1");
+        assert_eq!(merged[1].text, "existing-1");
     }
 
     #[test]

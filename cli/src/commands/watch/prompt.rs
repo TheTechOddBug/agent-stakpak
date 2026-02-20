@@ -94,6 +94,7 @@ pub fn assemble_prompt(schedule: &Schedule, check_result: Option<&CheckResult>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::watch::InteractionMode;
     use std::time::Duration;
 
     /// Create a test schedule with all fields populated.
@@ -115,7 +116,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
-            interaction: crate::commands::watch::InteractionMode::Interactive,
+            interaction: InteractionMode::Interactive,
             enabled: true,
         }
     }
@@ -139,7 +140,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
-            interaction: crate::commands::watch::InteractionMode::Interactive,
+            interaction: InteractionMode::Interactive,
             enabled: true,
         }
     }
