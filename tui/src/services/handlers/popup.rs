@@ -9,6 +9,7 @@ use crate::services::helper_block::{push_error_message, push_styled_message, wel
 use crate::services::message::{
     Message, get_wrapped_collapsed_message_lines_cached, invalidate_message_lines_cache,
 };
+use crate::services::text_selection::SelectionState;
 use ratatui::style::{Color, Style};
 use stakai::Model;
 use stakpak_api::models::ListRuleBook;
@@ -970,6 +971,9 @@ pub fn handle_message_action_popup_close(state: &mut AppState) {
     state.message_action_popup_position = None;
     state.message_action_target_message_id = None;
     state.message_action_target_text = None;
+    // Clear any stuck text selection (popup may have intercepted drag end)
+    state.selection = SelectionState::default();
+    state.text_area.clear_selection();
 }
 
 /// Navigate within the message action popup
