@@ -9,6 +9,7 @@ use crate::services::message::extract_truncated_command_arguments;
 use crate::services::message::{
     Message, MessageContent, get_command_type_name, invalidate_message_lines_cache,
 };
+use crate::services::text_selection::SelectionState;
 use ratatui::layout::Size;
 use ratatui::style::Color;
 use stakpak_shared::models::integrations::openai::ToolCall;
@@ -94,6 +95,11 @@ pub fn handle_esc_event(
     _shell_tx: &Sender<InputEvent>,
     cancel_tx: Option<tokio::sync::broadcast::Sender<()>>,
 ) {
+    // Always clear text selection on Escape (prevents stuck selections)
+    if state.selection.active {
+        state.selection = SelectionState::default();
+    }
+
     if state.show_rulebook_switcher {
         state.show_rulebook_switcher = false;
         return;
