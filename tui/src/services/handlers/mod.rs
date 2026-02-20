@@ -1676,7 +1676,6 @@ mod tests {
                 },
             ],
             allow_custom: false,
-            required: true,
             multi_select: false,
         }];
         let tool_call = ToolCall {
@@ -1765,7 +1764,6 @@ mod tests {
                     selected: false,
                 }],
                 allow_custom: false,
-                required: true,
                 multi_select: false,
             },
             AskUserQuestion {
@@ -1778,7 +1776,6 @@ mod tests {
                     selected: false,
                 }],
                 allow_custom: false,
-                required: true,
                 multi_select: false,
             },
         ];
@@ -1856,7 +1853,6 @@ mod tests {
                 },
             ],
             allow_custom: false,
-            required: true,
             multi_select: false,
         }];
         let tool_call = ToolCall {

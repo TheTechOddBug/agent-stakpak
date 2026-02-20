@@ -222,10 +222,9 @@ pub async fn run_interactive(
         let auth_display_info_for_tui = ctx.get_auth_display_info();
         let model_for_tui = model.clone();
 
-        // Use  init prompt (loaded at module level as const)
-        // When send_init_prompt_on_start is true (stakpak init), run discovery
-        // probes in parallel and append results to the init prompt.
-        let init_prompt_content_for_tui = if config.send_init_prompt_on_start {
+        // Use init prompt (loaded at module level as const).
+        // Always run discovery probes so both `stakpak init` and `/init` get pre-calculated analysis results.
+        let init_prompt_content_for_tui = {
             let discovery_output = crate::utils::discovery::run_all().await;
             if discovery_output.is_empty() {
                 Some(INIT_PROMPT.to_string())
@@ -236,8 +235,6 @@ pub async fn run_interactive(
                     discovery_output.trim()
                 ))
             }
-        } else {
-            Some(INIT_PROMPT.to_string())
         };
 
         let send_init_prompt_on_start = config.send_init_prompt_on_start;

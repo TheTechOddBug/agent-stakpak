@@ -411,26 +411,6 @@ pub fn handle_ask_user_submit(state: &mut AppState, output_tx: &Sender<OutputEve
         return;
     }
 
-    // Check if all required questions are answered
-    let all_required_answered = state
-        .ask_user_questions
-        .iter()
-        .filter(|q| q.required)
-        .all(|q| state.ask_user_answers.contains_key(&q.label));
-
-    if !all_required_answered {
-        // Can't submit yet - maybe flash a warning or navigate to first unanswered
-        // For now, just find the first unanswered required question and go there
-        for (i, q) in state.ask_user_questions.iter().enumerate() {
-            if q.required && !state.ask_user_answers.contains_key(&q.label) {
-                state.ask_user_current_tab = i;
-                state.ask_user_selected_option = 0;
-                break;
-            }
-        }
-        return;
-    }
-
     // Build the structured result as documented in the tool description
     let answers: Vec<AskUserAnswer> = state
         .ask_user_questions
@@ -575,7 +555,6 @@ mod tests {
                     },
                 ],
                 allow_custom: true,
-                required: true,
                 multi_select: false,
             },
             AskUserQuestion {
@@ -596,7 +575,6 @@ mod tests {
                     },
                 ],
                 allow_custom: false,
-                required: true,
                 multi_select: false,
             },
         ]
@@ -930,7 +908,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_blocked_without_required() {
+    async fn test_submit_with_partial_answers() {
         let mut state = create_test_state();
         let questions = create_test_questions();
         let tool_call = create_test_tool_call();
@@ -952,15 +930,22 @@ mod tests {
         // Go to Submit tab
         state.ask_user_current_tab = 2;
 
-        // Try to submit
+        // Try to submit — should succeed even with unanswered questions
         handle_ask_user_submit(&mut state, &output_tx);
 
-        // Should NOT have sent response
-        assert!(output_rx.try_recv().is_err());
-
-        // Should navigate to first unanswered required question
-        assert_eq!(state.ask_user_current_tab, 1); // Second question
-        assert!(state.show_ask_user_popup); // Popup still open
+        // Should have sent response
+        let event = output_rx.try_recv().unwrap();
+        match event {
+            OutputEvent::AskUserResponse(result) => {
+                assert_eq!(result.status, ToolCallResultStatus::Success);
+                let parsed: AskUserResult = serde_json::from_str(&result.result).unwrap();
+                assert!(parsed.completed);
+                assert_eq!(parsed.answers.len(), 1);
+                assert_eq!(parsed.answers[0].answer, "dev");
+            }
+            _ => panic!("Expected AskUserResponse event"),
+        }
+        assert!(!state.show_ask_user_popup); // Popup closed
     }
 
     #[tokio::test]
@@ -1062,7 +1047,6 @@ mod tests {
                 },
             ],
             allow_custom: false,
-            required: true,
             multi_select: true,
         }]
     }
@@ -1146,7 +1130,6 @@ mod tests {
                 selected: true,
             }],
             allow_custom: false,
-            required: true,
             multi_select: true,
         }];
         let tool_call = create_test_tool_call();
@@ -1160,7 +1143,7 @@ mod tests {
         // Toggle off the only selection
         handle_ask_user_select_option(&mut state, &output_tx);
 
-        // Answer should be removed (required validation will catch this)
+        // Answer should be removed
         assert!(!state.ask_user_answers.contains_key("Pick"));
     }
 
@@ -1226,7 +1209,6 @@ mod tests {
                 },
             ],
             allow_custom: true, // should be ignored for multi-select
-            required: false,
             multi_select: true,
         }];
         let tool_call = create_test_tool_call();
