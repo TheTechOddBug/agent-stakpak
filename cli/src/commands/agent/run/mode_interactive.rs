@@ -31,7 +31,7 @@ use stakpak_shared::models::llm::{LLMTokenUsage, PromptTokensDetails};
 
 /// Bundled infrastructure analysis prompt (embedded at compile time)
 /// analyze the infrastructure and provide a summary of the current state
-const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v3.md");
+const INIT_PROMPT: &str = include_str!("../../../../../libs/api/src/prompts/init.v4.md");
 use stakpak_shared::telemetry::{TelemetryEvent, capture_event};
 use stakpak_tui::{InputEvent, LoadingOperation, OutputEvent};
 use std::sync::Arc;
@@ -110,6 +110,21 @@ fn has_pending_tool_calls(messages: &[ChatMessage], tools_queue: &[ToolCall]) ->
 
     // Check if there are unresolved tool_calls in the messages
     !get_unresolved_tool_call_ids(messages).is_empty()
+}
+
+/// Find the index in the messages Vec of the nth user message (1-indexed).
+/// Used for reverting to a specific user message by truncating the messages array.
+fn find_nth_user_message_index(messages: &[ChatMessage], n: usize) -> Option<usize> {
+    let mut count = 0;
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == Role::User {
+            count += 1;
+            if count == n {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 pub struct RunInteractiveConfig {
@@ -196,8 +211,20 @@ pub async fn run_interactive(
         let auth_display_info_for_tui = ctx.get_auth_display_info();
         let model_for_tui = model.clone();
 
-        // Use  init prompt (loaded at module level as const)
-        let init_prompt_content_for_tui = Some(INIT_PROMPT.to_string());
+        // Use init prompt (loaded at module level as const).
+        // Always run discovery probes so both `stakpak init` and `/init` get pre-calculated analysis results.
+        let init_prompt_content_for_tui = {
+            let discovery_output = crate::utils::discovery::run_all().await;
+            if discovery_output.is_empty() {
+                Some(INIT_PROMPT.to_string())
+            } else {
+                Some(format!(
+                    "{}\n\n<discovery_results>\n{}</discovery_results>",
+                    INIT_PROMPT,
+                    discovery_output.trim()
+                ))
+            }
+        };
 
         let send_init_prompt_on_start = config.send_init_prompt_on_start;
         let tui_handle = tokio::spawn(async move {
@@ -438,7 +465,31 @@ pub async fn run_interactive(
                         model = new_model;
                         continue;
                     }
-                    OutputEvent::UserMessage(user_input, tool_calls_results, image_parts) => {
+                    OutputEvent::UserMessage(
+                        user_input,
+                        tool_calls_results,
+                        image_parts,
+                        revert_index,
+                    ) => {
+                        // Handle revert if provided - truncate messages to the specified user message index
+                        if let Some(target_user_idx) = revert_index {
+                            // Find the ChatMessage index for the nth user message
+                            let truncate_at =
+                                find_nth_user_message_index(&messages, target_user_idx);
+
+                            if let Some(idx) = truncate_at {
+                                // Truncate: remove target message and everything after
+                                messages.truncate(idx);
+                                // Clear the tools queue since we're reverting
+                                tools_queue.clear();
+                                log::info!(
+                                    "Reverted messages to user message index {} (truncated to {} messages)",
+                                    target_user_idx,
+                                    messages.len()
+                                );
+                            }
+                        }
+
                         let mut user_input = user_input.clone();
 
                         // Add user shell history to the user input

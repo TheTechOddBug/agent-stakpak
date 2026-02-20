@@ -430,6 +430,17 @@ fn render_plan_content(
     visual_rows: &[VisualRow],
     scroll_visual: usize,
 ) {
+    let md_style = crate::services::markdown_renderer::MarkdownStyle::adaptive();
+
+    // Pre-compute code block state for all logical lines so we know which lines
+    // fall inside fenced code blocks. We only need to scan up to the last visible
+    // logical line to keep this cheap.
+    let last_visible_logical = visual_rows
+        .get(scroll_visual + visible_height)
+        .map(|r| r.logical_line)
+        .unwrap_or(state.plan_review_lines.len());
+    let code_block_map = build_code_block_map(&state.plan_review_lines, last_visible_logical);
+
     let mut lines: Vec<Line<'_>> = Vec::with_capacity(visible_height);
 
     for i in 0..visible_height {
@@ -442,44 +453,14 @@ fn render_plan_content(
         let vrow = &visual_rows[vrow_idx];
         let logical = vrow.logical_line;
         let is_cursor = logical == state.plan_review_cursor_line;
+        let in_code_block = code_block_map.get(logical).copied().unwrap_or(false);
 
-        // Use the original logical line text for markdown detection
+        // Use the original logical line text for block-level markdown detection
         let original_trimmed = state
             .plan_review_lines
             .get(logical)
             .map(|s| s.trim())
             .unwrap_or("");
-
-        // Basic markdown styling
-        let style = if is_cursor {
-            // Cursor line: highlighted background
-            if original_trimmed.starts_with('#') {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().bg(Color::DarkGray)
-            }
-        } else if original_trimmed.starts_with("# ") || original_trimmed.starts_with("## ") {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if original_trimmed.starts_with("### ") {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else if original_trimmed.starts_with("```") {
-            Style::default().fg(Color::DarkGray)
-        } else if original_trimmed.starts_with("- ") || original_trimmed.starts_with("* ") {
-            Style::default().fg(Color::White)
-        } else if original_trimmed.starts_with("> ") {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            Style::default().fg(Color::White)
-        };
 
         // Continuation rows get a small indent to visually distinguish wrapping
         let display_text = if vrow.is_first {
@@ -488,11 +469,333 @@ fn render_plan_content(
             format!("  {}", vrow.text)
         };
 
-        lines.push(Line::from(Span::styled(display_text, style)));
+        // Build styled spans for this row
+        let styled_spans =
+            style_plan_line(&display_text, original_trimmed, in_code_block, &md_style);
+
+        // Apply cursor highlight as background overlay on each span
+        let final_spans = if is_cursor {
+            styled_spans
+                .into_iter()
+                .map(|span| {
+                    let mut s = span.style;
+                    s = s.bg(Color::DarkGray);
+                    Span::styled(span.content, s)
+                })
+                .collect()
+        } else {
+            styled_spans
+        };
+
+        lines.push(Line::from(final_spans));
     }
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, area);
+}
+
+/// Build a map of logical_line_index → is_inside_code_block.
+///
+/// Scans lines up to `max_line` (inclusive) tracking fenced code block toggles.
+fn build_code_block_map(lines: &[String], max_line: usize) -> Vec<bool> {
+    let limit = max_line.min(lines.len());
+    let mut map = vec![false; limit];
+    let mut in_code_block = false;
+
+    for (i, line) in lines.iter().take(limit).enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            // The fence line itself is styled as code block delimiter
+            map[i] = true;
+            in_code_block = !in_code_block;
+        } else {
+            map[i] = in_code_block;
+        }
+    }
+    map
+}
+
+/// Render a single plan line into styled spans with inline markdown formatting.
+///
+/// Block-level context (heading, code block, quote) is determined from the original
+/// logical line. Inline formatting (bold, code, italic, links) is parsed from the
+/// display text (which may be a wrapped substring).
+fn style_plan_line(
+    display_text: &str,
+    original_trimmed: &str,
+    in_code_block: bool,
+    md_style: &crate::services::markdown_renderer::MarkdownStyle,
+) -> Vec<Span<'static>> {
+    // Inside a fenced code block — render as code, no inline parsing
+    if in_code_block {
+        return vec![Span::styled(
+            display_text.to_string(),
+            md_style.code_block_style,
+        )];
+    }
+
+    // Fence delimiter line (``` or ```lang)
+    if original_trimmed.starts_with("```") {
+        return vec![Span::styled(
+            display_text.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+
+    // Headings — styled whole-line, no inline parsing needed
+    if original_trimmed.starts_with('#') {
+        let heading_style = heading_style_for(original_trimmed, md_style);
+        return vec![Span::styled(display_text.to_string(), heading_style)];
+    }
+
+    // Horizontal rules
+    if original_trimmed.starts_with("---")
+        || original_trimmed.starts_with("***")
+        || original_trimmed.starts_with("___")
+    {
+        return vec![Span::styled(
+            display_text.to_string(),
+            md_style.separator_style,
+        )];
+    }
+
+    // Task list items
+    if original_trimmed.starts_with("- [x]") || original_trimmed.starts_with("- [X]") {
+        return vec![Span::styled(
+            display_text.to_string(),
+            md_style.task_complete_style,
+        )];
+    }
+    if original_trimmed.starts_with("- [ ]") {
+        return vec![Span::styled(
+            display_text.to_string(),
+            md_style.task_open_style,
+        )];
+    }
+
+    // Blockquotes — italic base with inline formatting
+    if original_trimmed.starts_with("> ") {
+        let mut spans = parse_inline_spans(display_text, md_style);
+        // Apply quote style (italic + gray) as base, preserving inline overrides
+        for span in &mut spans {
+            if span.style == md_style.text_style || span.style == Style::default() {
+                span.style = md_style.quote_style.add_modifier(Modifier::ITALIC);
+            }
+        }
+        return spans;
+    }
+
+    // List items — bullet prefix + inline formatting for content
+    if original_trimmed.starts_with("- ") || original_trimmed.starts_with("* ") {
+        return parse_inline_spans(display_text, md_style);
+    }
+
+    // Numbered list items (e.g. "1. ", "12. ")
+    if is_numbered_list(original_trimmed) {
+        return parse_inline_spans(display_text, md_style);
+    }
+
+    // Regular paragraph — full inline formatting
+    parse_inline_spans(display_text, md_style)
+}
+
+/// Determine heading style based on heading level.
+fn heading_style_for(
+    trimmed: &str,
+    md_style: &crate::services::markdown_renderer::MarkdownStyle,
+) -> Style {
+    let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+    match hash_count {
+        1 => md_style.h1_style,
+        2 => md_style.h2_style,
+        3 => md_style.h3_style,
+        4 => md_style.h4_style,
+        5 => md_style.h5_style,
+        6 => md_style.h6_style,
+        _ => md_style.h1_style,
+    }
+}
+
+/// Check if a line starts with a numbered list pattern like "1. " or "12. ".
+fn is_numbered_list(trimmed: &str) -> bool {
+    let mut chars = trimmed.chars();
+    // Must start with a digit
+    if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Consume remaining digits
+    for c in chars.by_ref() {
+        if c == '.' {
+            // Next char must be a space
+            return chars.next() == Some(' ');
+        }
+        if !c.is_ascii_digit() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Parse inline markdown formatting in a text string into styled spans.
+///
+/// Handles: **bold**, *italic*, `code`, ~~strikethrough~~, and [links](url).
+/// Falls back gracefully — unmatched markers are rendered as plain text.
+fn parse_inline_spans(
+    text: &str,
+    md_style: &crate::services::markdown_renderer::MarkdownStyle,
+) -> Vec<Span<'static>> {
+    if text.is_empty() {
+        return vec![Span::raw("")];
+    }
+
+    // Quick check: if no formatting markers present, return plain text
+    if !has_inline_markers(text) {
+        return vec![Span::styled(text.to_string(), md_style.text_style)];
+    }
+
+    // Iterate by char_indices — every (byte_offset, char) is a valid boundary.
+    for (pos, ch) in text.char_indices() {
+        match ch {
+            // Bold: **text**
+            '*' if text[pos..].starts_with("**") => {
+                if let Some(end) = text[pos + 2..].find("**").map(|o| pos + 2 + o) {
+                    let mut spans = Vec::new();
+                    if pos > 0 {
+                        spans.extend(parse_inline_no_bold(&text[..pos], md_style));
+                    }
+                    spans.push(Span::styled(
+                        text[pos + 2..end].to_string(),
+                        md_style.bold_style,
+                    ));
+                    spans.extend(parse_inline_spans(&text[end + 2..], md_style));
+                    return spans;
+                }
+            }
+            // Italic: *text* (single *, not **)
+            '*' if !text[pos..].starts_with("**") => {
+                if let Some(end) = text[pos + 1..].find('*').map(|o| pos + 1 + o) {
+                    let mut spans = Vec::new();
+                    if pos > 0 {
+                        spans.extend(parse_inline_no_bold(&text[..pos], md_style));
+                    }
+                    spans.push(Span::styled(
+                        text[pos + 1..end].to_string(),
+                        md_style.italic_style,
+                    ));
+                    spans.extend(parse_inline_spans(&text[end + 1..], md_style));
+                    return spans;
+                }
+            }
+            // Inline code: `text`
+            '`' => {
+                if let Some(end) = text[pos + 1..].find('`').map(|o| pos + 1 + o) {
+                    let mut spans = Vec::new();
+                    if pos > 0 {
+                        spans.extend(parse_inline_spans(&text[..pos], md_style));
+                    }
+                    spans.push(Span::styled(
+                        text[pos + 1..end].to_string(),
+                        md_style.code_style,
+                    ));
+                    spans.extend(parse_inline_spans(&text[end + 1..], md_style));
+                    return spans;
+                }
+            }
+            // Strikethrough: ~~text~~
+            '~' if text[pos..].starts_with("~~") => {
+                if let Some(end) = text[pos + 2..].find("~~").map(|o| pos + 2 + o) {
+                    let mut spans = Vec::new();
+                    if pos > 0 {
+                        spans.extend(parse_inline_spans(&text[..pos], md_style));
+                    }
+                    spans.push(Span::styled(
+                        text[pos + 2..end].to_string(),
+                        md_style.strikethrough_style,
+                    ));
+                    spans.extend(parse_inline_spans(&text[end + 2..], md_style));
+                    return spans;
+                }
+            }
+            // Link: [text](url)
+            '[' => {
+                if let Some((link_text, _url, end_pos)) = parse_link_at(text, pos) {
+                    let mut spans = Vec::new();
+                    if pos > 0 {
+                        spans.extend(parse_inline_spans(&text[..pos], md_style));
+                    }
+                    spans.push(Span::styled(link_text.to_string(), md_style.link_style));
+                    spans.extend(parse_inline_spans(&text[end_pos..], md_style));
+                    return spans;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // No formatting found — return as plain text
+    vec![Span::styled(text.to_string(), md_style.text_style)]
+}
+
+/// Parse inline formatting excluding bold (to avoid infinite recursion when
+/// processing text segments between bold markers).
+fn parse_inline_no_bold(
+    text: &str,
+    md_style: &crate::services::markdown_renderer::MarkdownStyle,
+) -> Vec<Span<'static>> {
+    if text.is_empty() {
+        return vec![];
+    }
+
+    for (pos, ch) in text.char_indices() {
+        if ch == '`'
+            && let Some(end) = text[pos + 1..].find('`').map(|o| pos + 1 + o)
+        {
+            let mut spans = Vec::new();
+            if pos > 0 {
+                spans.push(Span::styled(text[..pos].to_string(), md_style.text_style));
+            }
+            spans.push(Span::styled(
+                text[pos + 1..end].to_string(),
+                md_style.code_style,
+            ));
+            spans.extend(parse_inline_no_bold(&text[end + 1..], md_style));
+            return spans;
+        }
+    }
+
+    vec![Span::styled(text.to_string(), md_style.text_style)]
+}
+
+/// Quick check for any inline formatting markers in text.
+fn has_inline_markers(text: &str) -> bool {
+    text.contains('*')
+        || text.contains('`')
+        || text.contains('~')
+        || (text.contains('[') && text.contains("]("))
+}
+
+/// Try to parse a markdown link at the given position: [text](url)
+/// All slicing uses positions from `str::find()` — always valid char boundaries.
+/// Returns (link_text, url, end_position_after_closing_paren).
+fn parse_link_at(text: &str, start: usize) -> Option<(&str, &str, usize)> {
+    // All markers ([, ], (, )) are ASCII = 1 byte, so +1 is always a valid boundary.
+    if !text[start..].starts_with('[') {
+        return None;
+    }
+    let after_bracket = start + 1;
+    let close_bracket = text[after_bracket..].find(']').map(|o| after_bracket + o)?;
+    let link_text = &text[after_bracket..close_bracket];
+
+    // Must be immediately followed by (
+    let paren_start = close_bracket + 1;
+    if !text[paren_start..].starts_with('(') {
+        return None;
+    }
+    let url_start = paren_start + 1;
+    let close_paren = text[url_start..].find(')').map(|o| url_start + o)?;
+    let url = &text[url_start..close_paren];
+
+    Some((link_text, url, close_paren + 1))
 }
 
 /// Render the right panel showing comments for the current cursor line.
@@ -943,6 +1246,281 @@ Build login and refresh endpoints.
         let msg = feedback.unwrap();
         assert!(!msg.contains("Resolved thing"));
         assert!(msg.contains("Open issue"));
+    }
+
+    // ─── Inline Markdown Rendering Tests ─────────────────────────────────────
+
+    fn md_style() -> crate::services::markdown_renderer::MarkdownStyle {
+        crate::services::markdown_renderer::MarkdownStyle::adaptive()
+    }
+
+    fn spans_text(spans: &[Span<'static>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_parse_inline_plain_text() {
+        let style = md_style();
+        let spans = parse_inline_spans("hello world", &style);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans_text(&spans), "hello world");
+    }
+
+    #[test]
+    fn test_parse_inline_bold() {
+        let style = md_style();
+        let spans = parse_inline_spans("before **bold** after", &style);
+        assert_eq!(spans_text(&spans), "before bold after");
+        // The bold span should have bold modifier
+        let bold_span = spans.iter().find(|s| s.content.as_ref() == "bold");
+        assert!(bold_span.is_some());
+        assert!(
+            bold_span
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_italic() {
+        let style = md_style();
+        let spans = parse_inline_spans("before *italic* after", &style);
+        assert_eq!(spans_text(&spans), "before italic after");
+        let italic_span = spans.iter().find(|s| s.content.as_ref() == "italic");
+        assert!(italic_span.is_some());
+        assert!(
+            italic_span
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_code() {
+        let style = md_style();
+        let spans = parse_inline_spans("use `kubectl apply`", &style);
+        assert_eq!(spans_text(&spans), "use kubectl apply");
+        let code_span = spans.iter().find(|s| s.content.as_ref() == "kubectl apply");
+        assert!(code_span.is_some());
+        assert_eq!(code_span.unwrap().style, style.code_style);
+    }
+
+    #[test]
+    fn test_parse_inline_strikethrough() {
+        let style = md_style();
+        let spans = parse_inline_spans("~~removed~~ kept", &style);
+        assert_eq!(spans_text(&spans), "removed kept");
+        let strike_span = spans.iter().find(|s| s.content.as_ref() == "removed");
+        assert!(strike_span.is_some());
+        assert!(
+            strike_span
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_link() {
+        let style = md_style();
+        let spans = parse_inline_spans("see [docs](https://example.com) here", &style);
+        assert_eq!(spans_text(&spans), "see docs here");
+        let link_span = spans.iter().find(|s| s.content.as_ref() == "docs");
+        assert!(link_span.is_some());
+        assert_eq!(link_span.unwrap().style, style.link_style);
+    }
+
+    #[test]
+    fn test_parse_inline_multiple_formats() {
+        let style = md_style();
+        let spans = parse_inline_spans("**bold** and `code`", &style);
+        assert_eq!(spans_text(&spans), "bold and code");
+    }
+
+    #[test]
+    fn test_parse_inline_unmatched_markers() {
+        let style = md_style();
+        // Single * without closing should be plain text
+        let spans = parse_inline_spans("hello * world", &style);
+        // The * finds "world" as italic content — that's fine, it's greedy
+        // Just verify no panic
+        assert!(!spans.is_empty());
+    }
+
+    #[test]
+    fn test_parse_inline_empty() {
+        let style = md_style();
+        let spans = parse_inline_spans("", &style);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans_text(&spans), "");
+    }
+
+    #[test]
+    fn test_parse_inline_unicode() {
+        let style = md_style();
+        // Emoji and multi-byte chars should not panic
+        let spans = parse_inline_spans("→ **héllo** wörld 🚀 `cödé`", &style);
+        let text = spans_text(&spans);
+        assert!(text.contains("héllo"));
+        assert!(text.contains("wörld"));
+        assert!(text.contains("🚀"));
+        assert!(text.contains("cödé"));
+    }
+
+    #[test]
+    fn test_parse_inline_unicode_around_markers() {
+        let style = md_style();
+        // Markers surrounded by multi-byte chars
+        let spans = parse_inline_spans("日本語**太字**テスト", &style);
+        let text = spans_text(&spans);
+        assert!(text.contains("太字"));
+        assert!(text.contains("日本語"));
+        assert!(text.contains("テスト"));
+    }
+
+    #[test]
+    fn test_parse_inline_emoji_markers() {
+        let style = md_style();
+        // Emoji right next to markers
+        let spans = parse_inline_spans("🔥`hot`🔥", &style);
+        let text = spans_text(&spans);
+        assert!(text.contains("hot"));
+        assert!(text.contains("🔥"));
+    }
+
+    #[test]
+    fn test_build_code_block_map_basic() {
+        let lines: Vec<String> = vec![
+            "normal".into(),
+            "```rust".into(),
+            "let x = 1;".into(),
+            "```".into(),
+            "after".into(),
+        ];
+        let map = build_code_block_map(&lines, 5);
+        assert!(!map[0]); // normal
+        assert!(map[1]); // ``` opening fence
+        assert!(map[2]); // inside code block
+        assert!(map[3]); // ``` closing fence
+        assert!(!map[4]); // after
+    }
+
+    #[test]
+    fn test_build_code_block_map_empty() {
+        let lines: Vec<String> = vec![];
+        let map = build_code_block_map(&lines, 0);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_build_code_block_map_nested_fences() {
+        let lines: Vec<String> = vec![
+            "```".into(),
+            "code".into(),
+            "```".into(),
+            "gap".into(),
+            "```".into(),
+            "more code".into(),
+            "```".into(),
+        ];
+        let map = build_code_block_map(&lines, 7);
+        assert!(map[0]); // opening
+        assert!(map[1]); // inside
+        assert!(map[2]); // closing
+        assert!(!map[3]); // gap
+        assert!(map[4]); // opening
+        assert!(map[5]); // inside
+        assert!(map[6]); // closing
+    }
+
+    #[test]
+    fn test_style_plan_line_heading_levels() {
+        let style = md_style();
+        let spans = style_plan_line("# H1", "# H1", false, &style);
+        assert_eq!(spans[0].style, style.h1_style);
+
+        let spans = style_plan_line("## H2", "## H2", false, &style);
+        assert_eq!(spans[0].style, style.h2_style);
+
+        let spans = style_plan_line("### H3", "### H3", false, &style);
+        assert_eq!(spans[0].style, style.h3_style);
+    }
+
+    #[test]
+    fn test_style_plan_line_code_block() {
+        let style = md_style();
+        let spans = style_plan_line("let x = 1;", "let x = 1;", true, &style);
+        assert_eq!(spans[0].style, style.code_block_style);
+    }
+
+    #[test]
+    fn test_style_plan_line_fence_delimiter() {
+        let style = md_style();
+        let spans = style_plan_line("```rust", "```rust", false, &style);
+        assert_eq!(spans[0].style, Style::default().fg(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_style_plan_line_task_items() {
+        let style = md_style();
+        let spans = style_plan_line("- [x] done", "- [x] done", false, &style);
+        assert_eq!(spans[0].style, style.task_complete_style);
+
+        let spans = style_plan_line("- [ ] todo", "- [ ] todo", false, &style);
+        assert_eq!(spans[0].style, style.task_open_style);
+    }
+
+    #[test]
+    fn test_style_plan_line_horizontal_rule() {
+        let style = md_style();
+        let spans = style_plan_line("---", "---", false, &style);
+        assert_eq!(spans[0].style, style.separator_style);
+    }
+
+    #[test]
+    fn test_is_numbered_list() {
+        assert!(is_numbered_list("1. First"));
+        assert!(is_numbered_list("12. Twelfth"));
+        assert!(is_numbered_list("999. Big"));
+        assert!(!is_numbered_list("not a list"));
+        assert!(!is_numbered_list("1.no space"));
+        assert!(!is_numbered_list(""));
+        assert!(!is_numbered_list("1."));
+    }
+
+    #[test]
+    fn test_parse_link_at_basic() {
+        let (text, url, end) = parse_link_at("[click](https://x.com)", 0).unwrap();
+        assert_eq!(text, "click");
+        assert_eq!(url, "https://x.com");
+        assert_eq!(end, 22);
+    }
+
+    #[test]
+    fn test_parse_link_at_offset() {
+        let input = "see [link](url) here";
+        let (text, url, end) = parse_link_at(input, 4).unwrap();
+        assert_eq!(text, "link");
+        assert_eq!(url, "url");
+        assert_eq!(end, 15);
+    }
+
+    #[test]
+    fn test_parse_link_at_no_link() {
+        assert!(parse_link_at("no link here", 0).is_none());
+        assert!(parse_link_at("[unclosed", 0).is_none());
+        assert!(parse_link_at("[text]no-paren", 0).is_none());
+    }
+
+    #[test]
+    fn test_parse_link_at_unicode() {
+        let (text, _url, _end) = parse_link_at("[日本語](https://jp.com)", 0).unwrap();
+        assert_eq!(text, "日本語");
     }
 }
 
