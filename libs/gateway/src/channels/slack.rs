@@ -244,11 +244,15 @@ impl SlackChannel {
                 }
 
                 let event = event_payload.event;
-                if event.event_type != "message" {
+                let is_message_like =
+                    matches!(event.event_type.as_str(), "message" | "app_mention");
+                if !is_message_like {
                     return Ok(HandleAction::Continue);
                 }
 
-                if event.subtype.is_some() || event.bot_id.is_some() {
+                if event.event_type == "message"
+                    && (event.subtype.is_some() || event.bot_id.is_some())
+                {
                     return Ok(HandleAction::Continue);
                 }
 
@@ -283,7 +287,11 @@ impl SlackChannel {
 
                 let channel_type = event.channel_type.unwrap_or_else(|| "channel".to_string());
                 let is_dm = channel_type == "im";
-                let mentioned = is_bot_mentioned(&raw_text, &own_bot_id);
+                let mentioned = if event.event_type == "app_mention" {
+                    true
+                } else {
+                    is_bot_mentioned(&raw_text, &own_bot_id)
+                };
 
                 let mut effective_thread_ts = event.thread_ts.clone();
 
