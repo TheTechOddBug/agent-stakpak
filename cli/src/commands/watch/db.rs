@@ -136,9 +136,24 @@ impl ScheduleDb {
             .map_err(|e| DbError::Connection(format!("Failed to open database: {}", e)))?;
 
         let storage = Self { db };
+        storage.configure_pragmas().await?;
         storage.init_schema().await?;
 
         Ok(storage)
+    }
+
+    async fn configure_pragmas(&self) -> Result<(), DbError> {
+        let conn = self.connection()?;
+        conn.execute("PRAGMA journal_mode = WAL", ())
+            .await
+            .map_err(|e| DbError::Query(format!("Failed to set journal_mode: {}", e)))?;
+        conn.execute("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|e| DbError::Query(format!("Failed to set busy_timeout: {}", e)))?;
+        conn.execute("PRAGMA synchronous = NORMAL", ())
+            .await
+            .map_err(|e| DbError::Query(format!("Failed to set synchronous: {}", e)))?;
+        Ok(())
     }
 
     fn connection(&self) -> Result<Connection, DbError> {
