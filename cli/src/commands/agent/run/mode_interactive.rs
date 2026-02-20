@@ -20,7 +20,7 @@ use crate::utils::check_update::get_latest_cli_version;
 use reqwest::header::HeaderMap;
 use stakpak_api::local::skills::{default_skill_directories, discover_skills};
 use stakpak_api::models::{ApiStreamError, Skill};
-use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, Model, models::ListRuleBook};
+use stakpak_api::{AgentClient, AgentClientConfig, AgentProvider, Model};
 
 use stakpak_mcp_server::EnabledToolsConfig;
 use stakpak_shared::models::integrations::mcp::CallToolResultExt;
@@ -146,7 +146,7 @@ pub async fn run_interactive(
         #[allow(unused_variables, unused_assignments)]
         let mut plan_mode_active = false;
         let mut plan_instructions_injected = false;
-        let mut should_update_rulebooks_on_next_message = false;
+        let mut should_refresh_skills_on_next_message = false;
         let mut total_session_usage = LLMTokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -161,7 +161,7 @@ pub async fn run_interactive(
         let config_path = ctx.config_path.clone();
         let _mcp_server_host = ctx.mcp_server_host.clone();
         let mut agent_context = config.agent_context.clone();
-        let mut all_available_rulebooks: Option<Vec<ListRuleBook>> = None;
+        let mut all_available_remote_skills: Option<Vec<Skill>> = None;
         let system_prompt = config.system_prompt.clone();
         let enable_subagents = config.enable_subagents;
         let checkpoint_id = config.checkpoint_id.clone();
@@ -336,9 +336,15 @@ pub async fn run_interactive(
                 .await;
             }
 
-            // Load available rulebooks and send to TUI
+            // Load remote rulebook-backed skills for context injection and TUI selection.
             if let Ok(all_rulebooks) = client.list_rulebooks().await {
-                all_available_rulebooks = Some(all_rulebooks.clone());
+                all_available_remote_skills = Some(
+                    all_rulebooks
+                        .iter()
+                        .cloned()
+                        .map(Skill::from)
+                        .collect::<Vec<_>>(),
+                );
                 let _ =
                     send_input_event(&input_tx, InputEvent::RulebooksLoaded(all_rulebooks)).await;
             }
@@ -350,7 +356,7 @@ pub async fn run_interactive(
 
                 current_session_id = Some(session_id_uuid);
                 current_metadata = checkpoint_metadata;
-                should_update_rulebooks_on_next_message = true;
+                should_refresh_skills_on_next_message = true;
                 tools_queue.extend(tool_calls.clone());
 
                 if !tools_queue.is_empty() {
@@ -443,12 +449,12 @@ pub async fn run_interactive(
                         }
 
                         // Enrich user input with unified agent context for new sessions
-                        // or when rulebook settings change.
+                        // or when remote skill selections change.
                         let user_input = if let Some(ref agent_ctx) = agent_context {
                             let is_first = is_first_non_system_message(&messages);
-                            let force = should_update_rulebooks_on_next_message;
+                            let force = should_refresh_skills_on_next_message;
                             if is_first || force {
-                                should_update_rulebooks_on_next_message = false;
+                                should_refresh_skills_on_next_message = false;
                                 agent_ctx.enrich_prompt(&user_input, is_first, force)
                             } else {
                                 user_input.to_string()
@@ -770,8 +776,8 @@ pub async fn run_interactive(
                                     current_session_id = Some(session_id_uuid);
                                     current_metadata = checkpoint_metadata;
 
-                                    // Mark that we need to update rulebooks on the next user message
-                                    should_update_rulebooks_on_next_message = true;
+                                    // Mark that we need to refresh skills on the next user message
+                                    should_refresh_skills_on_next_message = true;
 
                                     // Reset usage for the resumed session
                                     total_session_usage = LLMTokenUsage {
@@ -845,8 +851,8 @@ pub async fn run_interactive(
                                 current_session_id = Some(session_id_uuid);
                                 current_metadata = checkpoint_metadata;
 
-                                // Mark that we need to update rulebooks on the next user message
-                                should_update_rulebooks_on_next_message = true;
+                                // Mark that we need to refresh skills on the next user message
+                                should_refresh_skills_on_next_message = true;
 
                                 // Reset usage for the switched session
                                 total_session_usage = LLMTokenUsage {
@@ -1000,16 +1006,14 @@ pub async fn run_interactive(
                         ));
                     }
                     OutputEvent::RequestRulebookUpdate(selected_uris) => {
-                        // Update the selected remote rulebooks, then rebuild skill view.
-                        if let Some(all_rulebooks) = &all_available_rulebooks {
-                            let filtered_rulebooks: Vec<_> = all_rulebooks
+                        // Update selected remote skills (backed by rulebook URIs), then rebuild skill view.
+                        if let Some(all_remote_skills) = &all_available_remote_skills {
+                            let mut merged_skills: Vec<Skill> = all_remote_skills
                                 .iter()
-                                .filter(|rb| selected_uris.contains(&rb.uri))
+                                .filter(|skill| selected_uris.contains(&skill.uri))
                                 .cloned()
                                 .collect();
 
-                            let mut merged_skills: Vec<Skill> =
-                                filtered_rulebooks.into_iter().map(Skill::from).collect();
                             let skill_dirs = default_skill_directories();
                             let local_skills = discover_skills(&skill_dirs);
                             merged_skills.extend(local_skills);
@@ -1019,7 +1023,7 @@ pub async fn run_interactive(
                             }
 
                             // Set flag to refresh injected context on next message
-                            should_update_rulebooks_on_next_message = true;
+                            should_refresh_skills_on_next_message = true;
                         }
                         continue;
                     }

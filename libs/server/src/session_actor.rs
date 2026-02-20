@@ -154,12 +154,12 @@ async fn run_session_actor(
     let session_cwd = resolve_session_cwd(&state, session_id).await;
     let environment = EnvironmentContext::snapshot(&session_cwd).await;
 
-    // Combine caller context with pre-loaded rulebooks from AppState.
+    // Combine caller context with pre-loaded remote skills context from AppState.
     // Explicit caller context should force per-turn injection, even on resumed
-    // sessions, while startup rulebooks remain baseline context.
+    // sessions, while startup remote skills remain baseline context.
     let has_runtime_caller_context = !caller_context.is_empty();
     let mut all_caller_context = caller_context;
-    all_caller_context.extend(state.rulebooks.iter().cloned());
+    all_caller_context.extend(state.current_skills().await);
 
     let project =
         ProjectContext::discover(Path::new(&session_cwd)).with_caller_context(all_caller_context);

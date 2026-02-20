@@ -41,9 +41,9 @@ pub struct AppState {
     /// Falls back to process cwd if not set. Should be set to the directory
     /// where `stakpak up` was run so gateway sessions can discover project files.
     pub project_dir: Option<String>,
-    /// Pre-fetched rulebooks from the Stakpak API, loaded once at startup.
-    /// Injected into new session context so the agent has available rulebooks.
-    pub rulebooks: Arc<Vec<ContextFile>>,
+    /// Cached remote skill context files (currently fetched from the remote
+    /// skills endpoint contract) and injected into new sessions as baseline context.
+    pub skills_context: Arc<RwLock<Vec<ContextFile>>>,
     pending_tools: Arc<RwLock<HashMap<Uuid, PendingToolApprovals>>>,
 }
 
@@ -77,7 +77,7 @@ impl AppState {
             base_system_prompt: None,
             context_budget: ContextBudget::default(),
             project_dir: None,
-            rulebooks: Arc::new(Vec::new()),
+            skills_context: Arc::new(RwLock::new(Vec::new())),
             pending_tools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -116,14 +116,23 @@ impl AppState {
         self
     }
 
-    pub fn with_rulebooks(mut self, rulebooks: Vec<ContextFile>) -> Self {
-        self.rulebooks = Arc::new(rulebooks);
+    pub fn with_skills(mut self, context_files: Vec<ContextFile>) -> Self {
+        self.skills_context = Arc::new(RwLock::new(context_files));
         self
     }
 
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointStore>) -> Self {
         self.checkpoint_store = checkpoint_store;
         self
+    }
+
+    pub async fn current_skills(&self) -> Vec<ContextFile> {
+        self.skills_context.read().await.clone()
+    }
+
+    pub async fn replace_skills(&self, context_files: Vec<ContextFile>) {
+        let mut guard = self.skills_context.write().await;
+        *guard = context_files;
     }
 
     pub async fn current_mcp_tools(&self) -> Vec<stakai::Tool> {
