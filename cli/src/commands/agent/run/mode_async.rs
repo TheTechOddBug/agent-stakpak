@@ -17,7 +17,7 @@ use stakpak_shared::local_store::LocalStore;
 use stakpak_shared::models::async_manifest::{AsyncManifest, PauseReason, PendingToolCall};
 use stakpak_shared::models::integrations::openai::{ChatMessage, MessageContent, Role};
 use stakpak_shared::models::llm::LLMTokenUsage;
-use stakpak_shared::utils::backward_compatibility_mapping;
+use stakpak_shared::utils::{backward_compatibility_mapping, strip_tool_name};
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
@@ -156,20 +156,11 @@ impl AsyncAutoApproveConfig {
         }
     }
 
-    /// Strip MCP server prefix from tool name (e.g., "stakpak__run_command" -> "run_command").
-    fn strip_prefix(name: &str) -> &str {
-        if let Some(pos) = name.find("__")
-            && pos + 2 < name.len()
-        {
-            return &name[pos + 2..];
-        }
-        name
-    }
-
     fn get_policy(&self, tool_name: &str) -> &AsyncApprovePolicy {
-        let stripped = Self::strip_prefix(tool_name);
-        let mapped = backward_compatibility_mapping(stripped);
-        self.tools.get(mapped).unwrap_or(&self.default_policy)
+        // strip_tool_name handles MCP prefix stripping, "()" removal, and
+        // backward compatibility mapping (e.g., read_rulebook → load_skill).
+        let canonical = strip_tool_name(tool_name);
+        self.tools.get(canonical).unwrap_or(&self.default_policy)
     }
 
     fn should_auto_approve(&self, tool_name: &str) -> bool {
@@ -1004,5 +995,27 @@ mod tests {
     fn build_resume_command_returns_none_when_no_ids() {
         let resume_command = build_resume_command(None, None);
         assert_eq!(resume_command, None);
+    }
+
+    #[test]
+    fn auto_approve_canonicalizes_legacy_tool_names() {
+        let config = AsyncAutoApproveConfig::new(None);
+        assert!(
+            config.should_auto_approve("stakpak__read_rulebook"),
+            "legacy read_rulebook should map to load_skill"
+        );
+        assert!(
+            config.should_auto_approve("read_rulebooks()"),
+            "plural legacy alias with () should map to load_skill"
+        );
+    }
+
+    #[test]
+    fn auto_approve_canonicalizes_prefixed_prompt_tool_names() {
+        let config = AsyncAutoApproveConfig::new(None);
+        assert!(
+            !config.should_auto_approve("stakpak__run_command()"),
+            "run_command remains prompt-only after canonicalization"
+        );
     }
 }

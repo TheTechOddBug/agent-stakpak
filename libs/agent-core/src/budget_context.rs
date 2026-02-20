@@ -230,13 +230,14 @@ impl ContextReducer for BudgetAwareContextReducer {
             prev_trimmed_up_to
         };
 
+        // Final pass: ensure every message in [prev_clamped..effective_trim_end] is trimmed.
+        // Some of these may have been trimmed already by Phase 2 above — that's harmless
+        // because trim_message_with_delta is idempotent (delta=0 on already-trimmed content).
         let clamped_end = effective_trim_end.min(len);
-        if clamped_end > prev_clamped {
-            for msg in &mut messages[prev_clamped..clamped_end] {
-                if msg.role == Role::Assistant || msg.role == Role::Tool {
-                    let delta = Self::trim_message_with_delta(msg);
-                    raw_tokens = (raw_tokens as i64 + delta).max(0) as u64;
-                }
+        for msg in messages.iter_mut().take(clamped_end).skip(prev_clamped) {
+            if msg.role == Role::Assistant || msg.role == Role::Tool {
+                let delta = Self::trim_message_with_delta(msg);
+                raw_tokens = (raw_tokens as i64 + delta).max(0) as u64;
             }
         }
 

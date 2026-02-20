@@ -82,6 +82,11 @@ fn discover_agents_md(start_dir: &Path) -> Option<ContextFile> {
     ))
 }
 
+/// Discover APPS.md with a global fallback at `~/.stakpak/APPS.md`.
+///
+/// Unlike AGENTS.md (which is always project-specific), APPS.md can describe
+/// globally-managed applications and infrastructure, so a user-level fallback
+/// is supported when no project-local file is found.
 fn discover_apps_md(start_dir: &Path) -> Option<ContextFile> {
     if let Some(discovered) = discover_nearest_file(start_dir, &["APPS.md", "apps.md"]) {
         return Some(ContextFile::new(
@@ -92,6 +97,7 @@ fn discover_apps_md(start_dir: &Path) -> Option<ContextFile> {
         ));
     }
 
+    // Global fallback: ~/.stakpak/APPS.md
     let home = dirs::home_dir()?;
     let global_apps = home.join(".stakpak").join("APPS.md");
     let content = fs::read_to_string(&global_apps).ok()?;

@@ -39,8 +39,16 @@ impl EnvironmentContext {
             .ok()
             .flatten();
 
+        // Hostname detection can touch filesystem/process APIs; keep it off the
+        // async runtime worker threads.
+        let machine_name = tokio::task::spawn_blocking(detect_machine_name)
+            .await
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "unknown-machine".to_string());
+
         Self {
-            machine_name: detect_machine_name(),
+            machine_name,
             operating_system: detect_operating_system(),
             shell_type: detect_shell_type(),
             is_container: detect_container_environment(),
@@ -103,7 +111,32 @@ fn detect_machine_name() -> String {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
+        .or_else(platform_hostname)
         .unwrap_or_else(|| "unknown-machine".to_string())
+}
+
+/// Platform-native hostname fallback when env vars are not set.
+#[cfg(unix)]
+fn platform_hostname() -> Option<String> {
+    // Try /etc/hostname first (common on Linux), then fall back to POSIX uname.
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::process::Command::new("uname")
+                .arg("-n")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+#[cfg(not(unix))]
+fn platform_hostname() -> Option<String> {
+    None
 }
 
 fn detect_operating_system() -> String {

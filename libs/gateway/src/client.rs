@@ -8,7 +8,7 @@ use serde_json::Value;
 use stakpak_agent_core::ProposedToolCall;
 pub use stakpak_shared::models::context::{
     CallerContextInput, MAX_CALLER_CONTEXT_CONTENT_CHARS, MAX_CALLER_CONTEXT_ITEMS,
-    MAX_CALLER_CONTEXT_NAME_CHARS,
+    MAX_CALLER_CONTEXT_NAME_CHARS, validate_caller_context,
 };
 use uuid::Uuid;
 
@@ -606,32 +606,7 @@ fn map_error_status(status: StatusCode, body: String) -> Result<(), ClientError>
 }
 
 fn validate_context_inputs(inputs: &[CallerContextInput]) -> Result<(), ClientError> {
-    if inputs.len() > MAX_CALLER_CONTEXT_ITEMS {
-        return Err(ClientError::InvalidRequest(format!(
-            "context can include at most {} entries",
-            MAX_CALLER_CONTEXT_ITEMS
-        )));
-    }
-
-    for input in inputs {
-        let name_len = input.name.chars().count();
-        if name_len > MAX_CALLER_CONTEXT_NAME_CHARS {
-            return Err(ClientError::InvalidRequest(format!(
-                "context.name exceeds {} characters",
-                MAX_CALLER_CONTEXT_NAME_CHARS
-            )));
-        }
-
-        let content_len = input.content.chars().count();
-        if content_len > MAX_CALLER_CONTEXT_CONTENT_CHARS {
-            return Err(ClientError::InvalidRequest(format!(
-                "context.content exceeds {} characters",
-                MAX_CALLER_CONTEXT_CONTENT_CHARS
-            )));
-        }
-    }
-
-    Ok(())
+    validate_caller_context(inputs).map_err(ClientError::InvalidRequest)
 }
 
 #[cfg(test)]
@@ -675,13 +650,41 @@ mod tests {
     }
 
     #[test]
-    fn validate_context_inputs_rejects_whitespace_padded_name() {
+    fn validate_context_inputs_rejects_oversized_whitespace_only_name() {
         let input = CallerContextInput {
             name: " ".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
             content: "ok".to_string(),
             priority: None,
         };
 
+        assert!(
+            validate_context_inputs(&[input]).is_err(),
+            "raw name length must be enforced even when trimmed name is empty"
+        );
+    }
+
+    #[test]
+    fn validate_context_inputs_rejects_oversized_trimmed_name() {
+        let input = CallerContextInput {
+            name: "n".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
+            content: "ok".to_string(),
+            priority: None,
+        };
+
         assert!(validate_context_inputs(&[input]).is_err());
+    }
+
+    #[test]
+    fn validate_context_inputs_rejects_oversized_whitespace_only_content() {
+        let input = CallerContextInput {
+            name: "ctx".to_string(),
+            content: " ".repeat(MAX_CALLER_CONTEXT_CONTENT_CHARS + 1),
+            priority: None,
+        };
+
+        assert!(
+            validate_context_inputs(&[input]).is_err(),
+            "raw content length must be enforced even when trimmed content is empty"
+        );
     }
 }

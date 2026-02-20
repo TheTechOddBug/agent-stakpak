@@ -22,10 +22,7 @@ use stakpak_agent_core::{AgentCommand, AgentEvent, ToolDecision};
 use stakpak_api::{
     ListSessionsQuery, SessionStatus, StorageCreateSessionRequest, StorageUpdateSessionRequest,
 };
-use stakpak_shared::models::context::{
-    CallerContextInput, MAX_CALLER_CONTEXT_CONTENT_CHARS, MAX_CALLER_CONTEXT_ITEMS,
-    MAX_CALLER_CONTEXT_NAME_CHARS,
-};
+use stakpak_shared::models::context::{CallerContextInput, validate_caller_context};
 use std::{collections::HashMap, convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -978,43 +975,14 @@ fn validate_session_message_request(request: &SessionMessageRequest) -> Option<R
         ));
     }
 
-    if let Some(context_inputs) = request.context.as_ref() {
-        if context_inputs.len() > MAX_CALLER_CONTEXT_ITEMS {
-            return Some(api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_context",
-                &format!(
-                    "context can include at most {} entries",
-                    MAX_CALLER_CONTEXT_ITEMS
-                ),
-            ));
-        }
-
-        for input in context_inputs {
-            let name_len = input.name.chars().count();
-            if name_len > MAX_CALLER_CONTEXT_NAME_CHARS {
-                return Some(api_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_context",
-                    &format!(
-                        "context.name exceeds {} characters",
-                        MAX_CALLER_CONTEXT_NAME_CHARS
-                    ),
-                ));
-            }
-
-            let content_len = input.content.chars().count();
-            if content_len > MAX_CALLER_CONTEXT_CONTENT_CHARS {
-                return Some(api_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_context",
-                    &format!(
-                        "context.content exceeds {} characters",
-                        MAX_CALLER_CONTEXT_CONTENT_CHARS
-                    ),
-                ));
-            }
-        }
+    if let Some(context_inputs) = request.context.as_ref()
+        && let Err(message) = validate_caller_context(context_inputs)
+    {
+        return Some(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_context",
+            &message,
+        ));
     }
 
     None
@@ -1220,6 +1188,9 @@ mod tests {
     use http_body_util::BodyExt as _;
     use stakpak_agent_core::{ToolApprovalAction, ToolApprovalPolicy};
     use stakpak_api::SessionStorage;
+    use stakpak_shared::models::context::{
+        MAX_CALLER_CONTEXT_CONTENT_CHARS, MAX_CALLER_CONTEXT_ITEMS, MAX_CALLER_CONTEXT_NAME_CHARS,
+    };
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -2639,6 +2610,12 @@ mod tests {
     }
 
     #[test]
+    fn map_caller_context_inputs_handles_none() {
+        let mapped = map_caller_context_inputs(None);
+        assert!(mapped.is_empty());
+    }
+
+    #[test]
     fn map_caller_context_inputs_skips_empty_values() {
         let mapped = map_caller_context_inputs(Some(&[
             CallerContextInput {
@@ -2704,7 +2681,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_message_request_rejects_whitespace_padded_context_name() {
+    fn validate_session_message_request_rejects_oversized_whitespace_only_context_name() {
         let request = SessionMessageRequest {
             message: stakai::Message::new(stakai::Role::User, "hello"),
             r#type: SessionMessageType::Message,
@@ -2713,6 +2690,27 @@ mod tests {
             sandbox: None,
             context: Some(vec![CallerContextInput {
                 name: " ".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1),
+                content: "value".to_string(),
+                priority: None,
+            }]),
+        };
+
+        assert!(
+            validate_session_message_request(&request).is_some(),
+            "raw name length must be enforced even when trimmed name is empty"
+        );
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_oversized_trimmed_context_name() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(vec![CallerContextInput {
+                name: format!(" {} ", "n".repeat(MAX_CALLER_CONTEXT_NAME_CHARS + 1)),
                 content: "value".to_string(),
                 priority: None,
             }]),
@@ -2737,6 +2735,27 @@ mod tests {
         };
 
         assert!(validate_session_message_request(&request).is_some());
+    }
+
+    #[test]
+    fn validate_session_message_request_rejects_oversized_whitespace_only_context_content() {
+        let request = SessionMessageRequest {
+            message: stakai::Message::new(stakai::Role::User, "hello"),
+            r#type: SessionMessageType::Message,
+            run_id: None,
+            model: None,
+            sandbox: None,
+            context: Some(vec![CallerContextInput {
+                name: "ctx".to_string(),
+                content: " ".repeat(MAX_CALLER_CONTEXT_CONTENT_CHARS + 1),
+                priority: None,
+            }]),
+        };
+
+        assert!(
+            validate_session_message_request(&request).is_some(),
+            "raw content length must be enforced even when trimmed content is empty"
+        );
     }
 
     #[tokio::test]

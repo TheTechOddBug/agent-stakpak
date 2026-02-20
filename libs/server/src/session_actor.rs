@@ -222,6 +222,9 @@ async fn run_session_actor(
         }
     });
 
+    // Use the model's maximum output capacity as the output budget for context
+    // window calculations. This is conservative — the actual response may be shorter,
+    // but reserving the full limit avoids mid-response context truncation.
     let max_output_tokens = model.limit.output as u32;
     let agent_config = AgentConfig {
         model,
