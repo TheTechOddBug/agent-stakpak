@@ -144,13 +144,14 @@ impl ScheduleDb {
 
     async fn configure_pragmas(&self) -> Result<(), DbError> {
         let conn = self.connection()?;
-        conn.execute("PRAGMA journal_mode = WAL", ())
+        // journal_mode returns a result row, so use query() instead of execute()
+        conn.query("PRAGMA journal_mode = WAL", ())
             .await
             .map_err(|e| DbError::Query(format!("Failed to set journal_mode: {}", e)))?;
-        conn.execute("PRAGMA busy_timeout = 5000", ())
+        conn.query("PRAGMA busy_timeout = 5000", ())
             .await
             .map_err(|e| DbError::Query(format!("Failed to set busy_timeout: {}", e)))?;
-        conn.execute("PRAGMA synchronous = NORMAL", ())
+        conn.query("PRAGMA synchronous = NORMAL", ())
             .await
             .map_err(|e| DbError::Query(format!("Failed to set synchronous: {}", e)))?;
         Ok(())

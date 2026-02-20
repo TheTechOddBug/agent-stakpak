@@ -62,13 +62,14 @@ impl GatewayStore {
 
     async fn configure_pragmas(&self) -> Result<()> {
         let conn = self.connection()?;
-        conn.execute("PRAGMA journal_mode = WAL", ())
+        // journal_mode returns a result row, so use query() instead of execute()
+        conn.query("PRAGMA journal_mode = WAL", ())
             .await
             .context("failed to set journal_mode")?;
-        conn.execute("PRAGMA busy_timeout = 5000", ())
+        conn.query("PRAGMA busy_timeout = 5000", ())
             .await
             .context("failed to set busy_timeout")?;
-        conn.execute("PRAGMA synchronous = NORMAL", ())
+        conn.query("PRAGMA synchronous = NORMAL", ())
             .await
             .context("failed to set synchronous")?;
         Ok(())
