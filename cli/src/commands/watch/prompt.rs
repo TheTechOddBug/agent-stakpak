@@ -115,6 +115,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            interaction: crate::commands::watch::InteractionMode::Interactive,
             enabled: true,
         }
     }
@@ -138,6 +139,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            interaction: crate::commands::watch::InteractionMode::Interactive,
             enabled: true,
         }
     }

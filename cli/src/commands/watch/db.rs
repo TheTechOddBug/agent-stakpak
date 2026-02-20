@@ -93,6 +93,9 @@ pub struct ListRunsFilter {
 /// Well-known sentinel name used to request in-process schedule config reload.
 pub const RELOAD_SENTINEL: &str = "__config_reload__";
 
+/// Marker stored on running runs delegated to gateway interactive sessions.
+pub const INTERACTIVE_DELEGATED_NOTE: &str = "Delegated to interactive gateway session";
+
 /// A pending schedule request (for manual schedule fires).
 #[derive(Debug, Clone)]
 pub struct PendingSchedule {
@@ -332,6 +335,25 @@ impl ScheduleDb {
         conn.execute(
             "UPDATE trigger_runs SET agent_woken = 1, agent_session_id = ? WHERE id = ?",
             (session_id, run_id),
+        )
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Mark run as delegated to gateway interactive session while keeping status=running.
+    pub async fn update_run_interactive_started(
+        &self,
+        run_id: i64,
+        session_id: &str,
+        note: &str,
+    ) -> Result<(), DbError> {
+        let conn = self.connection()?;
+
+        conn.execute(
+            "UPDATE trigger_runs SET agent_woken = 1, agent_session_id = ?, error_message = ? WHERE id = ?",
+            (session_id, note, run_id),
         )
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
