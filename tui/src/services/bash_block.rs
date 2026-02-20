@@ -2339,10 +2339,6 @@ pub fn render_ask_user_block(
     formatted_lines.push(title_border);
 
     let max_content_width = inner_width;
-    let all_required_answered = questions
-        .iter()
-        .filter(|q| q.required)
-        .all(|q| answers.contains_key(&q.label));
     let is_submit_tab = current_tab >= questions.len();
 
     // --- Tab bar ---
@@ -2372,10 +2368,8 @@ pub fn render_ask_user_block(
 
         let submit_style = if is_submit_tab {
             Style::default().bg(Color::Cyan).fg(Color::Black)
-        } else if all_required_answered {
-            Style::default().fg(Color::Green)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Green)
         };
         tab_spans.push(Span::styled("Review", submit_style));
         tab_spans.push(Span::styled(" →", Style::default().fg(Color::DarkGray)));
@@ -2414,9 +2408,7 @@ pub fn render_ask_user_block(
         ]));
 
         for q in questions {
-            let required_marker = if q.required { " *" } else { "" };
-            let label_text = format!("{}{}", q.label, required_marker);
-            let label_width = calculate_display_width(&label_text);
+            let label_width = calculate_display_width(&q.label);
             let label_padding = max_content_width.saturating_sub(label_width);
             formatted_lines.push(Line::from(vec![
                 Span::styled("│", Style::default().fg(border_color)),
@@ -2427,7 +2419,6 @@ pub fn render_ask_user_block(
                         .fg(term_color(Color::White))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(required_marker, Style::default().fg(Color::Red)),
                 Span::from(" ".repeat(label_padding)),
                 Span::styled(" │", Style::default().fg(border_color)),
             ]));
@@ -2493,18 +2484,6 @@ pub fn render_ask_user_block(
                         Span::styled(" │", Style::default().fg(border_color)),
                     ]));
                 }
-            } else if q.required {
-                let text = "  □ not answered";
-                let text_width = calculate_display_width(text);
-                let text_padding = max_content_width.saturating_sub(text_width);
-                formatted_lines.push(Line::from(vec![
-                    Span::styled("│", Style::default().fg(border_color)),
-                    Span::from(" "),
-                    Span::styled("  □ ", Style::default().fg(Color::Yellow)),
-                    Span::styled("not answered", Style::default().fg(Color::Yellow)),
-                    Span::from(" ".repeat(text_padding)),
-                    Span::styled(" │", Style::default().fg(border_color)),
-                ]));
             } else {
                 let text = "  — skipped";
                 let text_width = calculate_display_width(text);
@@ -2524,19 +2503,6 @@ pub fn render_ask_user_block(
                 Span::styled("│", Style::default().fg(border_color)),
                 Span::from(" ".repeat(inner_width + 2)),
                 Span::styled("│", Style::default().fg(border_color)),
-            ]));
-        }
-
-        if !all_required_answered {
-            let warn = "Answer all required (*) questions to submit";
-            let warn_width = calculate_display_width(warn);
-            let warn_padding = max_content_width.saturating_sub(warn_width);
-            formatted_lines.push(Line::from(vec![
-                Span::styled("│", Style::default().fg(border_color)),
-                Span::from(" "),
-                Span::styled(warn, Style::default().fg(Color::Yellow)),
-                Span::from(" ".repeat(warn_padding)),
-                Span::styled(" │", Style::default().fg(border_color)),
             ]));
         }
     } else if let Some(q) = questions.get(current_tab) {
@@ -2792,19 +2758,11 @@ pub fn render_ask_user_block(
 
     // --- Help text ---
     {
-        let help_spans = if is_submit_tab && all_required_answered {
+        let help_spans = if is_submit_tab {
             vec![
                 Span::styled("Enter", Style::default().fg(Color::DarkGray)),
                 Span::styled(" submit", Style::default().fg(Color::Green)),
                 Span::raw(" · "),
-                Span::styled("←/→", Style::default().fg(Color::DarkGray)),
-                Span::styled(" questions", Style::default().fg(Color::Cyan)),
-                Span::raw(" · "),
-                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
-                Span::styled(" cancel", Style::default().fg(Color::Cyan)),
-            ]
-        } else if is_submit_tab {
-            vec![
                 Span::styled("←/→", Style::default().fg(Color::DarkGray)),
                 Span::styled(" questions", Style::default().fg(Color::Cyan)),
                 Span::raw(" · "),
