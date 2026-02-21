@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_CALLER_CONTEXT_ITEMS: usize = 32;
 pub const MAX_CALLER_CONTEXT_NAME_CHARS: usize = 256;
 pub const MAX_CALLER_CONTEXT_CONTENT_CHARS: usize = 50_000;
+pub const MAX_CALLER_CONTEXT_TOTAL_CHARS: usize = 500_000;
 
 /// Structured caller-provided context injected into server session runs.
 ///
@@ -28,6 +29,8 @@ pub fn validate_caller_context(inputs: &[CallerContextInput]) -> Result<(), Stri
         ));
     }
 
+    let mut total_content_chars: usize = 0;
+
     for input in inputs {
         let raw_name_len = input.name.chars().count();
         if raw_name_len > MAX_CALLER_CONTEXT_NAME_CHARS {
@@ -42,6 +45,14 @@ pub fn validate_caller_context(inputs: &[CallerContextInput]) -> Result<(), Stri
             return Err(format!(
                 "context.content exceeds {} characters",
                 MAX_CALLER_CONTEXT_CONTENT_CHARS
+            ));
+        }
+
+        total_content_chars = total_content_chars.saturating_add(raw_content_len);
+        if total_content_chars > MAX_CALLER_CONTEXT_TOTAL_CHARS {
+            return Err(format!(
+                "total context exceeds {} characters",
+                MAX_CALLER_CONTEXT_TOTAL_CHARS
             ));
         }
 
@@ -99,6 +110,19 @@ mod tests {
             priority: None,
         };
         assert!(validate_caller_context(&[input]).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_total_content_over_limit() {
+        let inputs: Vec<_> = (0..11)
+            .map(|i| CallerContextInput {
+                name: format!("ctx-{i}"),
+                content: "x".repeat(MAX_CALLER_CONTEXT_CONTENT_CHARS),
+                priority: None,
+            })
+            .collect();
+
+        assert!(validate_caller_context(&inputs).is_err());
     }
 
     #[test]

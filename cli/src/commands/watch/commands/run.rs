@@ -638,7 +638,7 @@ async fn handle_schedule_event(
     };
 
     // Assemble prompt + structured caller context
-    let prompt = assemble_prompt(schedule);
+    let prompt = assemble_prompt(schedule, check_result.as_ref());
     let caller_context = build_schedule_caller_context(schedule, check_result.as_ref());
 
     info!(schedule = %schedule.name, "Waking agent");

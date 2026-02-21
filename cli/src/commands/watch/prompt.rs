@@ -1,34 +1,26 @@
 //! Prompt assembly for autopilot schedules.
 //!
-//! The user-facing prompt should stay focused on the requested task.
-//! Operational metadata (schedule/check/board) is sent separately as
-//! structured caller context and injected server-side.
+//! The user-facing prompt stays focused on the requested task.
+//! Operational metadata (schedule/check/board) is still sent separately as
+//! structured caller context and injected server-side. We also include a
+//! compact metadata fallback in the user prompt so runs remain debuggable if
+//! structured context is unavailable.
 
 use crate::commands::watch::{CheckResult, Schedule};
 use stakpak_gateway::client::CallerContextInput;
 use stakpak_shared::utils::truncate_chars_with_ellipsis;
 
-/// Assemble the user prompt to pass to the agent.
-///
-/// Kept as a small seam so watch/autopilot can evolve prompt shaping in one
-/// place while keeping callsites stable.
-///
-/// Schedule metadata is intentionally excluded here to avoid duplicating the
-/// same information in both user text and structured caller context.
-pub fn assemble_prompt(schedule: &Schedule) -> String {
-    schedule.prompt.clone()
-}
+const PROMPT_FALLBACK_STREAM_CHARS: usize = 2_000;
+const CALLER_CONTEXT_STREAM_CHARS: usize = 20_000;
 
-/// Build structured caller context for schedule-driven runs.
-///
-/// This keeps run metadata out of raw user text and lets the server-side
-/// context pipeline apply budgeting/priority rules consistently.
-pub fn build_schedule_caller_context(
+fn build_schedule_metadata_lines(
     schedule: &Schedule,
     check_result: Option<&CheckResult>,
-) -> Vec<CallerContextInput> {
+    stream_chars_limit: usize,
+) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("Schedule: {}", schedule.name));
+    lines.push(format!("Cron: {}", schedule.cron));
 
     if let Some(result) = check_result
         && let Some(check_path) = &schedule.check
@@ -43,7 +35,7 @@ pub fn build_schedule_caller_context(
         if !stdout.is_empty() {
             lines.push(format!(
                 "Check stdout:\n{}",
-                truncate_chars_with_ellipsis(stdout, 20_000)
+                truncate_chars_with_ellipsis(stdout, stream_chars_limit)
             ));
         }
 
@@ -51,7 +43,7 @@ pub fn build_schedule_caller_context(
         if !stderr.is_empty() {
             lines.push(format!(
                 "Check stderr:\n{}",
-                truncate_chars_with_ellipsis(stderr, 20_000)
+                truncate_chars_with_ellipsis(stderr, stream_chars_limit)
             ));
         }
     }
@@ -59,6 +51,42 @@ pub fn build_schedule_caller_context(
     if let Some(board_id) = &schedule.board_id {
         lines.push(format!("Board: {}", board_id));
     }
+
+    lines
+}
+
+/// Assemble the user prompt to pass to the agent.
+///
+/// Kept as a small seam so watch/autopilot can evolve prompt shaping in one
+/// place while keeping callsites stable.
+///
+/// A compact schedule metadata block is appended as a fallback in case
+/// structured caller context injection is unavailable.
+pub fn assemble_prompt(schedule: &Schedule, check_result: Option<&CheckResult>) -> String {
+    let mut prompt = schedule.prompt.clone();
+    let metadata =
+        build_schedule_metadata_lines(schedule, check_result, PROMPT_FALLBACK_STREAM_CHARS)
+            .join("\n\n");
+
+    if !metadata.is_empty() {
+        prompt.push_str(
+            "\n\n---\nOperational context fallback (use if structured context is missing):\n\n",
+        );
+        prompt.push_str(&metadata);
+    }
+
+    prompt
+}
+
+/// Build structured caller context for schedule-driven runs.
+///
+/// This keeps rich run metadata out of the raw user prompt and lets the
+/// server-side context pipeline apply budgeting/priority rules consistently.
+pub fn build_schedule_caller_context(
+    schedule: &Schedule,
+    check_result: Option<&CheckResult>,
+) -> Vec<CallerContextInput> {
+    let lines = build_schedule_metadata_lines(schedule, check_result, CALLER_CONTEXT_STREAM_CHARS);
 
     vec![CallerContextInput {
         name: "watch_schedule_context".to_string(),
@@ -104,11 +132,17 @@ mod tests {
     }
 
     #[test]
-    fn assemble_prompt_returns_user_prompt_only() {
+    fn assemble_prompt_includes_fallback_metadata() {
         let schedule = full_schedule();
+        let check_result = check_result_with_stdout("disk usage 92%");
 
-        let prompt = assemble_prompt(&schedule);
-        assert_eq!(prompt, schedule.prompt);
+        let prompt = assemble_prompt(&schedule, Some(&check_result));
+        assert!(prompt.contains(&schedule.prompt));
+        assert!(prompt.contains("Operational context fallback"));
+        assert!(prompt.contains("Schedule: disk-cleanup"));
+        assert!(prompt.contains("Cron: */15 * * * *"));
+        assert!(prompt.contains("Check stdout:"));
+        assert!(prompt.contains("Board: board_abc123"));
     }
 
     #[test]
@@ -121,6 +155,7 @@ mod tests {
         assert_eq!(context[0].name, "watch_schedule_context");
         assert_eq!(context[0].priority.as_deref(), Some("high"));
         assert!(context[0].content.contains("Schedule: disk-cleanup"));
+        assert!(context[0].content.contains("Cron: */15 * * * *"));
         assert!(context[0].content.contains("Check stdout:"));
         assert!(!context[0].content.contains("Check stderr:"));
         assert!(context[0].content.contains("Board: board_abc123"));
@@ -151,9 +186,9 @@ mod tests {
 
     #[test]
     fn truncate_context_exact_boundary() {
-        let value = "a".repeat(20_000);
-        let truncated = truncate_chars_with_ellipsis(&value, 20_000);
-        assert_eq!(truncated.len(), 20_000);
+        let value = "a".repeat(CALLER_CONTEXT_STREAM_CHARS);
+        let truncated = truncate_chars_with_ellipsis(&value, CALLER_CONTEXT_STREAM_CHARS);
+        assert_eq!(truncated.len(), CALLER_CONTEXT_STREAM_CHARS);
         assert!(!truncated.ends_with("..."));
     }
 
@@ -182,6 +217,10 @@ mod tests {
         let context = build_schedule_caller_context(&schedule, None);
         assert_eq!(context.len(), 1);
         assert!(context[0].content.contains("Schedule: simple-task"));
+        assert!(context[0].content.contains("Cron: 0 * * * *"));
         assert!(!context[0].content.contains("Check script:"));
+
+        let prompt = assemble_prompt(&schedule, None);
+        assert!(prompt.contains("Schedule: simple-task"));
     }
 }

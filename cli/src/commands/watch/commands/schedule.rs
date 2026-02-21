@@ -181,7 +181,7 @@ pub async fn fire_schedule(name: &str, dry_run: bool) -> Result<(), String> {
         };
 
         // Assemble user prompt + structured caller context preview
-        let prompt = assemble_prompt(schedule);
+        let prompt = assemble_prompt(schedule, check_result.as_ref());
         let caller_context = build_schedule_caller_context(schedule, check_result.as_ref());
 
         println!("\nAssembled prompt:");
