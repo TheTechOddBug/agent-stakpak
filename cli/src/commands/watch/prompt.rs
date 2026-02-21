@@ -98,6 +98,7 @@ pub fn build_schedule_caller_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::watch::InteractionMode;
     use std::time::Duration;
 
     fn full_schedule() -> Schedule {
@@ -118,6 +119,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            interaction: InteractionMode::Interactive,
             enabled: true,
         }
     }
@@ -211,6 +213,7 @@ mod tests {
             notify_on: None,
             notify_channel: None,
             notify_chat_id: None,
+            interaction: InteractionMode::Interactive,
             enabled: true,
         };
 
