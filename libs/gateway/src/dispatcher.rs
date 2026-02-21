@@ -10,11 +10,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
+use stakpak_shared::utils::truncate_chars_with_ellipsis;
+
 use crate::{
     channels::Channel,
     client::{
-        MessageType, SendMessageOptions, StakpakClient, ToolCallsProposedPayload,
-        ToolDecisionAction, ToolDecisionInput,
+        CallerContextInput, MessageType, SendMessageOptions, StakpakClient,
+        ToolCallsProposedPayload, ToolDecisionAction, ToolDecisionInput,
     },
     config::ApprovalMode,
     router::{RouterConfig, resolve_routing_key},
@@ -58,6 +60,7 @@ struct QueuedMessage {
     inbound: InboundMessage,
     text: String,
     run_options: RunStartOptions,
+    context: Vec<CallerContextInput>,
 }
 
 #[derive(Debug)]
@@ -157,16 +160,16 @@ impl Dispatcher {
         );
 
         let target_key = target_key_from_inbound(&inbound);
-        let enriched_text = match self
+        let caller_context = match self
             .store
             .pop_delivery_context(&inbound.channel.0, &target_key)
             .await
         {
-            Ok(Some(context)) => enrich_with_context(&context, &inbound.text),
-            Ok(None) => inbound.text.clone(),
+            Ok(Some(context)) => delivery_context_to_caller_context(&context),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 warn!(error = %error, "failed to pop delivery context");
-                inbound.text.clone()
+                Vec::new()
             }
         };
 
@@ -208,9 +211,10 @@ impl Dispatcher {
 
         let run_options = extract_run_options(&inbound.metadata);
         let queued = QueuedMessage {
-            inbound,
-            text: enriched_text,
+            text: inbound.text.clone(),
             run_options,
+            context: caller_context,
+            inbound,
         };
 
         if self.is_run_active(&mapping.session_id) {
@@ -270,6 +274,7 @@ impl Dispatcher {
                     message_type: MessageType::Message,
                     run_id: None,
                     sandbox: queued.run_options.sandbox,
+                    context: queued.context.clone(),
                 },
             )
             .await;
@@ -359,27 +364,27 @@ impl Dispatcher {
 
         let combined_text = format_batched_queue_messages(&queue);
 
-        if let Some(latest) = queue.last() {
-            let routing_key = resolve_routing_key(
-                &self.router_config,
-                &latest.inbound.channel,
-                &latest.inbound.peer_id,
-                &latest.inbound.chat_type,
-            );
-            let delivery = self.delivery_context_from_inbound(&latest.inbound);
-            if let Err(error) = self.store.update_delivery(&routing_key, &delivery).await {
-                warn!(error = %error, "failed to refresh delivery context from queue");
-            }
-        }
+        // Keep only the latest caller context snapshot to avoid breaching
+        // context item limits during long queue drains.
+        let combined_context = latest_non_empty_context(&queue);
 
-        let Some(latest) = queue.last() else {
-            return Ok(());
-        };
+        let latest = &queue[queue.len() - 1];
+        let routing_key = resolve_routing_key(
+            &self.router_config,
+            &latest.inbound.channel,
+            &latest.inbound.peer_id,
+            &latest.inbound.chat_type,
+        );
+        let delivery = self.delivery_context_from_inbound(&latest.inbound);
+        if let Err(error) = self.store.update_delivery(&routing_key, &delivery).await {
+            warn!(error = %error, "failed to refresh delivery context from queue");
+        }
 
         let queued = QueuedMessage {
             inbound: latest.inbound.clone(),
             text: combined_text,
             run_options: latest.run_options.clone(),
+            context: combined_context,
         };
 
         if let Err(error) = self.start_run(session_id.to_string(), queued, run_tx).await {
@@ -791,37 +796,68 @@ fn build_tool_decisions(
         .collect()
 }
 
-fn enrich_with_context(context: &serde_json::Value, user_text: &str) -> String {
-    let mut enriched =
-        String::from("The user is replying to a previous notification.\n\n--- Watch Context ---\n");
+const MAX_CONTEXT_FIELD_CHARS: usize = 8_000;
+
+fn latest_non_empty_context(queue: &[QueuedMessage]) -> Vec<CallerContextInput> {
+    queue
+        .iter()
+        .rev()
+        .find_map(|item| {
+            if item.context.is_empty() {
+                None
+            } else {
+                Some(item.context.clone())
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn delivery_context_to_caller_context(context: &serde_json::Value) -> Vec<CallerContextInput> {
+    let mut lines = vec![
+        "The user is replying to a previous notification.".to_string(),
+        "--- Watch Context ---".to_string(),
+    ];
 
     if let Some(trigger) = context.get("trigger").and_then(|value| value.as_str()) {
-        enriched.push_str(&format!("Trigger: {trigger}\n"));
+        lines.push(format!(
+            "Trigger: {}",
+            truncate_chars_with_ellipsis(trigger, MAX_CONTEXT_FIELD_CHARS)
+        ));
     }
 
     if let Some(status) = context.get("status").and_then(|value| value.as_str()) {
-        enriched.push_str(&format!("Status: {status}\n"));
+        lines.push(format!(
+            "Status: {}",
+            truncate_chars_with_ellipsis(status, MAX_CONTEXT_FIELD_CHARS)
+        ));
     }
 
     if let Some(summary) = context.get("summary").and_then(|value| value.as_str()) {
-        enriched.push_str(&format!("Summary: {summary}\n"));
+        lines.push(format!(
+            "Summary: {}",
+            truncate_chars_with_ellipsis(summary, MAX_CONTEXT_FIELD_CHARS)
+        ));
     }
 
     if let Some(check_output) = context.get("check_output").and_then(|value| value.as_str()) {
-        enriched.push_str(&format!("Check output: {check_output}\n"));
+        lines.push(format!(
+            "Check output: {}",
+            truncate_chars_with_ellipsis(check_output, MAX_CONTEXT_FIELD_CHARS)
+        ));
     }
 
-    enriched.push_str("---\n\n");
-    enriched.push_str(&format!("User message: {user_text}"));
-    enriched
+    lines.push("---".to_string());
+
+    vec![CallerContextInput {
+        name: "watch_delivery_context".to_string(),
+        content: lines.join("\n\n"),
+        priority: Some("high".to_string()),
+    }]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        QueuedMessage, extract_run_options, format_batched_queue_messages, merge_drained_queue,
-        sender_name, should_flush_stream_buffer, take_completed_line_chunk,
-    };
+    use super::*;
     use crate::types::{ChannelId, ChatType, InboundMessage, PeerId};
     use chrono::Utc;
     use std::time::Duration;
@@ -843,8 +879,69 @@ mod tests {
                 timestamp: Utc::now(),
             },
             text: text.to_string(),
-            run_options: super::RunStartOptions::default(),
+            run_options: RunStartOptions::default(),
+            context: Vec::new(),
         }
+    }
+
+    fn inbound() -> InboundMessage {
+        InboundMessage {
+            channel: ChannelId("slack".to_string()),
+            peer_id: PeerId("u1".to_string()),
+            chat_type: ChatType::Direct,
+            text: "hello".to_string(),
+            media: Vec::new(),
+            metadata: serde_json::Value::Null,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn delivery_context_maps_to_caller_context_entry() {
+        let context = serde_json::json!({
+            "trigger": "nightly",
+            "status": "failed",
+            "summary": "disk at 95%",
+            "check_output": "df -h"
+        });
+
+        let mapped = delivery_context_to_caller_context(&context);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].name, "watch_delivery_context");
+        assert_eq!(mapped[0].priority.as_deref(), Some("high"));
+        assert!(mapped[0].content.contains("Trigger: nightly"));
+        assert!(mapped[0].content.contains("Status: failed"));
+    }
+
+    #[test]
+    fn truncate_chars_respects_unicode_boundaries() {
+        let input = "ééééé";
+        let output = truncate_chars_with_ellipsis(input, 3);
+        assert_eq!(output, "ééé...");
+    }
+
+    #[test]
+    fn delivery_context_maps_partial_payload() {
+        let context = serde_json::json!({ "trigger": "manual" });
+
+        let mapped = delivery_context_to_caller_context(&context);
+        assert_eq!(mapped.len(), 1);
+        assert!(mapped[0].content.contains("Trigger: manual"));
+        assert!(!mapped[0].content.contains("Status:"));
+        assert!(!mapped[0].content.contains("Summary:"));
+        assert!(!mapped[0].content.contains("Check output:"));
+    }
+
+    #[test]
+    fn delivery_context_handles_empty_payload() {
+        let mapped = delivery_context_to_caller_context(&serde_json::json!({}));
+        assert_eq!(mapped.len(), 1);
+        assert!(
+            mapped[0]
+                .content
+                .contains("The user is replying to a previous notification")
+        );
+        assert!(!mapped[0].content.contains("Trigger:"));
     }
 
     #[test]
@@ -916,5 +1013,44 @@ mod tests {
         assert_eq!(options.model.as_deref(), Some("claude-sonnet"));
         assert_eq!(options.sandbox, Some(true));
         assert_eq!(options.timeout_seconds, Some(60));
+    }
+
+    #[test]
+    fn latest_non_empty_context_prefers_last_non_empty() {
+        let queue = vec![
+            QueuedMessage {
+                inbound: inbound(),
+                text: "one".to_string(),
+                run_options: RunStartOptions::default(),
+                context: Vec::new(),
+            },
+            QueuedMessage {
+                inbound: inbound(),
+                text: "two".to_string(),
+                run_options: RunStartOptions::default(),
+                context: vec![CallerContextInput {
+                    name: "ctx".to_string(),
+                    content: "value".to_string(),
+                    priority: Some("high".to_string()),
+                }],
+            },
+        ];
+
+        let context = latest_non_empty_context(&queue);
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].name, "ctx");
+    }
+
+    #[test]
+    fn latest_non_empty_context_all_empty_returns_empty() {
+        let queue = vec![QueuedMessage {
+            inbound: inbound(),
+            text: "one".to_string(),
+            run_options: RunStartOptions::default(),
+            context: Vec::new(),
+        }];
+
+        let context = latest_non_empty_context(&queue);
+        assert!(context.is_empty());
     }
 }
